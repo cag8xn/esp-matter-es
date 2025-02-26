@@ -1,3 +1,14 @@
+# SPDX-FileCopyrightText: 2020-2021 Project CHIP Authors
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+# SPDX-FileContributor: 2022-2024 Espressif Systems (Shanghai) PTE LTD
+#
+# Modified the original code to support external platform on ESP32 SoCs.
+#
+# For original code and license information, please refer to
+# https://github.com/project-chip/connectedhomeip
+
 # Copyright (c) 2021 Project CHIP Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -21,10 +32,12 @@ declare_args() {
   # By default use default/example implementation of CommissionableDataProvider,
   # DeviceAttestationCredentialsProvider and DeviceInstanceInfoProvider
   chip_use_transitional_commissionable_data_provider = true
+  chip_use_transitional_device_instance_info_provider = true
   chip_use_factory_data_provider = false
   chip_use_device_info_provider = false
   chip_config_software_version_number = 0
   chip_enable_chipoble = true
+  chip_enable_ethernet = false
   chip_bt_nimble_enabled = true
   chip_bt_bluedroid_enabled = true
   chip_max_discovered_ip_addresses = 5
@@ -48,6 +61,7 @@ buildconfig_header("custom_buildconfig") {
     "CHIP_DEVICE_LAYER_TARGET_ESP32=1",
     "CHIP_DEVICE_LAYER_TARGET=ESP32_custom",
     "CHIP_USE_TRANSITIONAL_COMMISSIONABLE_DATA_PROVIDER=1",
+    "CHIP_USE_TRANSITIONAL_DEVICE_INSTANCE_INFO_PROVIDER=1",
     "BLE_PLATFORM_CONFIG_INCLUDE=<platform/ESP32_custom/BlePlatformConfig.h>",
     "CHIP_DEVICE_PLATFORM_CONFIG_INCLUDE=<platform/ESP32_custom/CHIPDevicePlatformConfig.h>",
     "CHIP_PLATFORM_CONFIG_INCLUDE=<platform/ESP32_custom/CHIPPlatformConfig.h>",
@@ -59,6 +73,7 @@ buildconfig_header("custom_buildconfig") {
     "EXTERNAL_BLEMANAGERIMPL_HEADER=<platform/ESP32_custom/BLEManagerImpl.h>",
     "EXTERNAL_KEYVALUESTOREMANAGERIMPL_HEADER=<platform/ESP32_custom/KeyValueStoreManagerImpl.h>",
     "EXTERNAL_PLATFORMMANAGERIMPL_HEADER=<platform/ESP32_custom/PlatformManagerImpl.h>",
+    "EXTERNAL_THREADSTACKMANAGERIMPL_HEADER=<platform/ESP32_custom/ThreadStackManagerImpl.h>",
     "CHIP_CONFIG_SOFTWARE_VERSION_NUMBER=${chip_config_software_version_number}",
     "CHIP_DEVICE_CONFIG_MAX_DISCOVERED_IP_ADDRESSES=${chip_max_discovered_ip_addresses}",
   ]
@@ -105,6 +120,11 @@ static_library("ESP32_custom") {
     "${chip_root}/src/setup_payload",
   ]
 
+  public = [
+    "${chip_root}/src/credentials/CHIPCert.h",
+    "${chip_root}/src/credentials/DeviceAttestationCredsProvider.h",
+  ]
+
   public_deps = [
     "${chip_root}/src/crypto",
     "${chip_root}/src/platform:platform_base",
@@ -141,17 +161,12 @@ static_library("ESP32_custom") {
       "ConnectivityManagerImpl_WiFi.cpp",
       "NetworkCommissioningDriver.cpp",
       "NetworkCommissioningDriver.h",
-      "route_hook/ESP32RouteHook.c",
-      "route_hook/ESP32RouteHook.h",
-      "route_hook/ESP32RouteTable.c",
-      "route_hook/ESP32RouteTable.h",
     ]
-    if (chip_mdns == "platform") {
-      sources += [
-        "DnssdImpl.cpp",
-        "DnssdImpl.h",
-      ]
-    }
+  }
+  if (chip_mdns == "platform") {
+    sources += [
+      "DnssdImpl.cpp",
+    ]
   }
 
   if (chip_use_factory_data_provider) {
@@ -166,5 +181,44 @@ static_library("ESP32_custom") {
       "ESP32DeviceInfoProvider.cpp",
       "ESP32DeviceInfoProvider.h",
     ]
+  }
+
+  if (chip_enable_ethernet || chip_enable_wifi) {
+    if (chip_mdns == "platform") {
+      sources += [
+        "ESP32DnssdImpl.cpp",
+        "ESP32DnssdImpl.h",
+      ]
+    }
+    if (chip_mdns == "minimal") {
+      sources += [ "ESP32EndpointQueueFilter.h" ]
+    }
+    if (chip_enable_route_hook) {
+      sources += [
+        "route_hook/ESP32RouteHook.c",
+        "route_hook/ESP32RouteHook.h",
+        "route_hook/ESP32RouteTable.c",
+        "route_hook/ESP32RouteTable.h",
+      ]
+    }
+  }
+
+  if (chip_enable_openthread) {
+    sources += [
+      "${chip_root}/src/platform/OpenThread/GenericNetworkCommissioningThreadDriver.cpp",
+      "${chip_root}/src/platform/OpenThread/GenericNetworkCommissioningThreadDriver.h",
+      "${chip_root}/src/platform/OpenThread/OpenThreadUtils.cpp",
+      "OpenthreadLauncher.cpp",
+      "OpenthreadLauncher.h",
+      "ThreadStackManagerImpl.cpp",
+      "ThreadStackManagerImpl.h",
+    ]
+    if (chip_mdns == "platform") {
+      sources += [
+        "${chip_root}/src/platform/OpenThread/OpenThreadDnssdImpl.cpp",
+        "${chip_root}/src/platform/OpenThread/OpenThreadDnssdImpl.h",
+      ]
+    }
+    configs -= [ "${chip_root}/build/config/compiler:warnings_default" ]
   }
 }

@@ -6,21 +6,39 @@
    CONDITIONS OF ANY KIND, either express or implied.
 */
 
-#include <esp_check.h>
-#include <esp_log.h>
-#include <esp_matter.h>
+#include <string.h>
+#include "esp_check.h"
+#include "esp_log.h"
+#include "esp_matter.h"
 #include "esp_console.h"
 #include "esp_vfs_dev.h"
 #include "linenoise/linenoise.h"
 #include "argtable3/argtable3.h"
 #include "esp_vfs_fat.h"
+#include "driver/usb_serial_jtag.h"
+#include "esp_vfs_usb_serial_jtag.h"
 #include "hal/uart_types.h"
 #include "driver/uart.h"
+#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+#include "esp_vfs_usb_serial_jtag.h"
+#include "driver/usb_serial_jtag.h"
+#endif // CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+#include <app_priv.h>
 #include <helpers.h>
 #include <device_types.h>
-#include <string.h>
+#include <app/clusters/fan-control-server/fan-control-delegate.h>
+#include <app/clusters/fan-control-server/fan-control-server.h>
+
+#ifdef CONFIG_OPENTHREAD_BORDER_ROUTER
+#include <platform/KvsPersistentStorageDelegate.h>
+#include <platform/OpenThread/GenericThreadBorderRouterDelegate.h>
+using chip::app::Clusters::ThreadBorderRouterManagement::GenericOpenThreadBorderRouterDelegate;
+#endif // CONFIG_OPENTHREAD_BORDER_ROUTER
+
 
 using namespace esp_matter;
+
+extern uint16_t app_endpoint_id;
 
 static const char *TAG = "esp_matter_console_helpers";
 
@@ -28,11 +46,17 @@ extern SemaphoreHandle_t semaphoreHandle;
 
 #define PROMPT_STR CONFIG_IDF_TARGET
 
+#define SPEED_MAX_SET 100
+#define ROCK_SET 0
+#define ROCK_SUPPORT_SET 7
+#define AIRFLOW_DIRECTION_SET 0
+#define WIND_SET  0
+#define WIND_SUPPORT_SET 7
+
 #if CONFIG_STORE_HISTORY
 
 #define MOUNT_PATH "/data"
 #define HISTORY_PATH MOUNT_PATH "/history.txt"
-
 
 static void initialize_filesystem(void)
 {
@@ -201,7 +225,34 @@ int create(uint8_t device_type_index)
         }
         case ESP_MATTER_FAN: {
             esp_matter::endpoint::fan::config_t fan_config;
+            #if CONFIG_IDF_TARGET_ESP32 || CONFIG_IDF_TARGET_ESP32S3
+            static FanDelegateImpl fan_delegate(app_endpoint_id);
+            fan_config.fan_control.delegate = &fan_delegate;
+            #endif
             endpoint = esp_matter::endpoint::fan::create(node, &fan_config, ENDPOINT_FLAG_NONE, NULL);
+            cluster_t *cluster = cluster::get(endpoint, chip::app::Clusters::FanControl::Id);
+            cluster::fan_control::feature::multi_speed::config_t multispeed_config;
+            cluster::fan_control::feature::rocking::config_t rock_config;
+            cluster::fan_control::feature::airflow_direction::config_t airflow_direction_config;
+            cluster::fan_control::feature::wind::config_t wind_config;
+
+            multispeed_config.speed_max = SPEED_MAX_SET;
+            cluster::fan_control::feature::multi_speed::add(cluster, &multispeed_config);
+
+            rock_config.rock_setting = ROCK_SET;
+            rock_config.rock_support = ROCK_SUPPORT_SET;
+            cluster::fan_control::feature::rocking::add(cluster, &rock_config);
+
+            airflow_direction_config.airflow_direction = AIRFLOW_DIRECTION_SET;
+            cluster::fan_control::feature::airflow_direction::add(cluster, &airflow_direction_config);
+
+            wind_config.wind_setting = WIND_SET;
+            wind_config.wind_support = WIND_SUPPORT_SET;
+            cluster::fan_control::feature::wind::add(cluster, &wind_config);
+
+            cluster::fan_control::feature::step::add(cluster);
+
+            app_endpoint_id = endpoint::get_id(endpoint);
             break;
         }
         case ESP_MATTER_THERMOSTAT: {
@@ -211,12 +262,17 @@ int create(uint8_t device_type_index)
         }
         case ESP_MATTER_AGGREGATOR: {
             esp_matter::endpoint::aggregator::config_t aggregator_config;
-	    endpoint = esp_matter::endpoint::aggregator::create(node, &aggregator_config, ENDPOINT_FLAG_NONE, NULL);
+	        endpoint = esp_matter::endpoint::aggregator::create(node, &aggregator_config, ENDPOINT_FLAG_NONE, NULL);
             break;
         }
         case ESP_MATTER_BRIDGED_NODE: {
             esp_matter::endpoint::bridged_node::config_t bridged_node_config;
             endpoint = esp_matter::endpoint::bridged_node::create(node, &bridged_node_config, ENDPOINT_FLAG_NONE, NULL);
+            break;
+        }
+        case ESP_MATTER_CONTROL_BRIDGE: {
+            esp_matter::endpoint::control_bridge::config_t control_bridge_config;
+	        endpoint = esp_matter::endpoint::control_bridge::create(node, &control_bridge_config, ENDPOINT_FLAG_NONE, NULL);
             break;
         }
         case ESP_MATTER_DOOR_LOCK: {
@@ -255,6 +311,7 @@ int create(uint8_t device_type_index)
         }
         case ESP_MATTER_OCCUPANCY_SENSOR: {
             esp_matter::endpoint::occupancy_sensor::config_t occupancy_sensor_config;
+            occupancy_sensor_config.occupancy_sensing.features = cluster::occupancy_sensing::feature::other::get_id();
             endpoint = esp_matter::endpoint::occupancy_sensor::create(node, &occupancy_sensor_config, ENDPOINT_FLAG_NONE, NULL);
             break;
         }
@@ -280,6 +337,7 @@ int create(uint8_t device_type_index)
         }
         case ESP_MATTER_PUMP: {
             esp_matter::endpoint::pump::config_t pump_config;
+            pump_config.pump_configuration_and_control.features = cluster::pump_configuration_and_control::feature::constant_pressure::get_id();
             endpoint = esp_matter::endpoint::pump::create(node, &pump_config, ENDPOINT_FLAG_NONE, NULL);
             break;
         }
@@ -301,6 +359,23 @@ int create(uint8_t device_type_index)
         case ESP_MATTER_REFRIGERATOR: {
             esp_matter::endpoint::refrigerator::config_t refrigerator_config;
             endpoint = esp_matter::endpoint::refrigerator::create(node, &refrigerator_config, ENDPOINT_FLAG_NONE, NULL);
+
+            esp_matter::endpoint::temperature_controlled_cabinet::config_t temperature_controlled_cabinet_config;
+            esp_matter::endpoint_t *tcc_endpoint = esp_matter::endpoint::temperature_controlled_cabinet::create(node, &temperature_controlled_cabinet_config, ENDPOINT_FLAG_NONE, NULL);
+
+            if (!tcc_endpoint) {
+                ESP_LOGE(TAG, "Matter create endpoint failed");
+                return 1;
+            }
+
+            esp_matter::cluster_t *cluster = esp_matter::cluster::get(tcc_endpoint, chip::app::Clusters::TemperatureControl::Id);
+            cluster::temperature_control::feature::temperature_number::config_t temperature_number_config;
+            cluster::temperature_control::feature::temperature_number::add(cluster, &temperature_number_config);
+            break;
+        }
+        case ESP_MATTER_OVEN: {
+            esp_matter::endpoint::oven::config_t oven_config;
+            endpoint = esp_matter::endpoint::oven::create(node, &oven_config, ENDPOINT_FLAG_NONE, NULL);
 
             esp_matter::endpoint::temperature_controlled_cabinet::config_t temperature_controlled_cabinet_config;
             esp_matter::endpoint_t *tcc_endpoint = esp_matter::endpoint::temperature_controlled_cabinet::create(node, &temperature_controlled_cabinet_config, ENDPOINT_FLAG_NONE, NULL);
@@ -358,6 +433,11 @@ int create(uint8_t device_type_index)
             endpoint = esp_matter::endpoint::water_leak_detector::create(node, &water_leak_detector_config, ENDPOINT_FLAG_NONE, NULL);
             break;
         }
+        case ESP_MATTER_WATER_FREEZE_DETECTOR: {
+            esp_matter::endpoint::water_freeze_detector::config_t water_freeze_detector_config;
+            endpoint = esp_matter::endpoint::water_freeze_detector::create(node, &water_freeze_detector_config, ENDPOINT_FLAG_NONE, NULL);
+            break;
+        }
         case ESP_MATTER_POWER_SOURCE: {
             esp_matter::endpoint::power_source_device::config_t power_source_device_config;
             endpoint = esp_matter::endpoint::power_source_device::create(node, &power_source_device_config, ENDPOINT_FLAG_NONE, NULL);
@@ -371,6 +451,104 @@ int create(uint8_t device_type_index)
         case ESP_MATTER_ELECTRICAL_SENSOR: {
             esp_matter::endpoint::electrical_sensor::config_t electrical_sensor_config;
             endpoint = esp_matter::endpoint::electrical_sensor::create(node, &electrical_sensor_config, ENDPOINT_FLAG_NONE, NULL);
+            break;
+        }
+        case ESP_MATTER_COOKTOP: {
+            esp_matter::endpoint::cooktop::config_t cooktop_config;
+            endpoint = esp_matter::endpoint::cooktop::create(node, &cooktop_config, ENDPOINT_FLAG_NONE, NULL);
+            break;
+        }
+        case ESP_MATTER_ENERGY_EVSE: {
+            esp_matter::endpoint::energy_evse::config_t energy_evse_config;
+            endpoint = esp_matter::endpoint::energy_evse::create(node, &energy_evse_config, ENDPOINT_FLAG_NONE, NULL);
+
+            esp_matter::endpoint::power_source_device::config_t power_source_config;
+            esp_matter::endpoint_t *ps_endpoint = esp_matter::endpoint::power_source_device::create(node, &power_source_config, ENDPOINT_FLAG_NONE, NULL);
+            esp_matter::endpoint::electrical_sensor::config_t electrical_sensor_config;
+            esp_matter::endpoint::electrical_sensor::add(ps_endpoint, &electrical_sensor_config);
+
+            if (!ps_endpoint) {
+                ESP_LOGE(TAG, "Matter create endpoint failed");
+                return 1;
+            }
+            break;
+        }
+        case ESP_MATTER_MICROWAVE_OVEN: {
+            esp_matter::endpoint::microwave_oven::config_t microwave_oven_config;
+            endpoint = esp_matter::endpoint::microwave_oven::create(node, &microwave_oven_config, ENDPOINT_FLAG_NONE, NULL);
+            break;
+        }
+        case ESP_MATTER_EXTRACTOR_HOOD: {
+            esp_matter::endpoint::extractor_hood::config_t extractor_hood_config;
+            endpoint = esp_matter::endpoint::extractor_hood::create(node, &extractor_hood_config, ENDPOINT_FLAG_NONE, NULL);
+            break;
+        }
+        case ESP_MATTER_LAUNDRY_DRYER: {
+            esp_matter::endpoint::laundry_dryer::config_t laundry_dryer_config;
+            endpoint = esp_matter::endpoint::laundry_dryer::create(node, &laundry_dryer_config, ENDPOINT_FLAG_NONE, NULL);
+            break;
+        }
+        case ESP_MATTER_WATER_VALVE: {
+            esp_matter::endpoint::water_valve::config_t water_valve_config;
+            endpoint = esp_matter::endpoint::water_valve::create(node, &water_valve_config, ENDPOINT_FLAG_NONE, NULL);
+            break;
+        }
+        case ESP_MATTER_DEVICE_ENERGY_MANAGEMENT: {
+            esp_matter::endpoint::device_energy_management::config_t device_energy_management_config;
+            endpoint = esp_matter::endpoint::device_energy_management::create(node, &device_energy_management_config, ENDPOINT_FLAG_NONE, NULL);
+            break;
+        }
+        case ESP_MATTER_PUMP_CONTROLLER: {
+            esp_matter::endpoint::pump_controller::config_t pump_controller_config;
+            endpoint = esp_matter::endpoint::pump_controller::create(node, &pump_controller_config, ENDPOINT_FLAG_NONE, NULL);
+            break;
+        }
+#ifdef CONFIG_OPENTHREAD_BORDER_ROUTER
+        case ESP_MATTER_THREAD_BORDER_ROUTER: {
+            static chip::KvsPersistentStorageDelegate tbr_storage_delegate;
+            chip::DeviceLayer::PersistedStorage::KeyValueStoreManager & kvsManager = chip::DeviceLayer::PersistedStorage::KeyValueStoreMgr();
+            tbr_storage_delegate.Init(&kvsManager);
+            GenericOpenThreadBorderRouterDelegate *delegate = chip::Platform::New<GenericOpenThreadBorderRouterDelegate>(&tbr_storage_delegate);
+            if (!delegate) {
+                ESP_LOGE(TAG, "Failed to create thread_border_router delegate");
+                return 1;
+            }
+            char threadBRName[] = "Espressif-ThreadBR";
+            delegate->SetThreadBorderRouterName(chip::CharSpan(threadBRName));
+            esp_matter::endpoint::thread_border_router::config_t tbr_config;
+            tbr_config.thread_border_router_management.delegate = delegate;
+            endpoint = esp_matter::endpoint::thread_border_router::create(node, &tbr_config, ENDPOINT_FLAG_NONE, NULL);
+            break;
+        }
+#endif
+        case ESP_MATTER_MOUNTED_ON_OFF_CONTROL: {
+            esp_matter::endpoint::mounted_on_off_control::config_t mounted_on_off_control_config;
+            endpoint = esp_matter::endpoint::mounted_on_off_control::create(node, &mounted_on_off_control_config, ENDPOINT_FLAG_NONE, NULL);
+            break;
+        }
+        case ESP_MATTER_MOUNTED_DIMMABLE_LOAD_CONTROL: {
+            esp_matter::endpoint::mounted_dimmable_load_control::config_t mounted_dimmable_load_control_config;
+            endpoint = esp_matter::endpoint::mounted_dimmable_load_control::create(node, &mounted_dimmable_load_control_config, ENDPOINT_FLAG_NONE, NULL);
+            break;
+        }
+        case ESP_MATTER_WATER_HEATER: {
+            esp_matter::endpoint::water_heater::config_t water_heater_config;
+            endpoint = esp_matter::endpoint::water_heater::create(node, &water_heater_config, ENDPOINT_FLAG_NONE, NULL);
+            break;
+        }
+        case ESP_MATTER_SOLAR_POWER: {
+            esp_matter::endpoint::solar_power::config_t solar_power_config;
+            endpoint = esp_matter::endpoint::solar_power::create(node, &solar_power_config, ENDPOINT_FLAG_NONE, NULL);
+            break;
+        }
+        case ESP_MATTER_BATTERY_STORAGE: {
+            esp_matter::endpoint::battery_storage::config_t battery_storage_config;
+            endpoint = esp_matter::endpoint::battery_storage::create(node, &battery_storage_config, ENDPOINT_FLAG_NONE, NULL);
+            break;
+        }
+        case ESP_MATTER_HEAT_PUMP: {
+            esp_matter::endpoint::heat_pump::config_t heat_pump_config;
+            endpoint = esp_matter::endpoint::heat_pump::create(node, &heat_pump_config, ENDPOINT_FLAG_NONE, NULL);
             break;
         }
         default: {

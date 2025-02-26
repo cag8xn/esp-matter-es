@@ -210,18 +210,6 @@ menu "ESP Matter"
 
     endchoice #ESP_MATTER_MEM_ALLOC_MODE
 
-    config ESP_MATTER_NVS_USE_COMPACT_ATTR_STORAGE
-        bool "Use compact attribute storage"
-        default n
-        help
-            Attributes can be stored as primitive data type or blob in NVS.
-            This option lets you select which one to use.
-
-            If enabled, attributes are stored as primitive data types in NVS.
-            If disabled, then attributes are stored as blob which consumes more space in NVS.
-
-            This option is kept disabled by default to maintain the backward compatibility.
-
     config ESP_MATTER_ENABLE_DATA_MODEL
         bool "Use ESP-Matter data model"
         default y
@@ -239,5 +227,15 @@ menu "ESP Matter"
 
             If enabled, we will start Matter server when calling esp_matter::start()
             If disabled, the Matter server will not be initialized in esp_matter::start()
+
+    config ESP_MATTER_ENABLE_OPENTHREAD
+        bool "Initialize Thread stack and start Thread task when starting ESP-Matter"
+        default y
+        help
+            Enabled this option to initialize Thread stack and start Thread task when calling
+            esp_matter::start()
+
+            Disable this option to initialize Thread stack and start Thread task with more
+            flexibility.
 
 endmenu

@@ -11,7 +11,6 @@
 #include <nvs_flash.h>
 
 #include <esp_matter.h>
-#include <esp_matter_cluster.h>
 #include <esp_matter_console.h>
 #include <esp_matter_ota.h>
 
@@ -23,9 +22,18 @@
 #endif
 
 #include <app/server/CommissioningWindowManager.h>
-#include <app/clusters/diagnostic-logs-server/diagnostic-logs-server.h>
-#include <diagnostic-logs-provider-delegate-impl.h>
 #include <app/server/Server.h>
+
+#ifdef CONFIG_ENABLE_SET_CERT_DECLARATION_API
+#include <esp_matter_providers.h>
+#include <lib/support/Span.h>
+#ifdef CONFIG_SEC_CERT_DAC_PROVIDER
+#include <platform/ESP32/ESP32SecureCertDACProvider.h>
+#elif defined(CONFIG_FACTORY_PARTITION_DAC_PROVIDER)
+#include <platform/ESP32/ESP32FactoryDataProvider.h>
+#endif
+using namespace chip::DeviceLayer;
+#endif
 
 static const char *TAG = "app_main";
 uint16_t light_endpoint_id = 0;
@@ -36,6 +44,13 @@ using namespace esp_matter::endpoint;
 using namespace chip::app::Clusters;
 
 constexpr auto k_timeout_seconds = 300;
+
+#ifdef CONFIG_ENABLE_SET_CERT_DECLARATION_API
+extern const uint8_t cd_start[] asm("_binary_certification_declaration_der_start");
+extern const uint8_t cd_end[] asm("_binary_certification_declaration_der_end");
+
+const chip::ByteSpan cdSpan(cd_start, static_cast<size_t>(cd_end - cd_start));
+#endif // CONFIG_ENABLE_SET_CERT_DECLARATION_API
 
 #if CONFIG_ENABLE_ENCRYPTED_OTA
 extern const char decryption_key_start[] asm("_binary_esp_image_encryption_key_pem_start");
@@ -165,15 +180,11 @@ extern "C" void app_main()
     node_t *node = node::create(&node_config, app_attribute_update_cb, app_identification_cb);
     ABORT_APP_ON_FAILURE(node != nullptr, ESP_LOGE(TAG, "Failed to create Matter node"));
 
-    // add diagnostic logs cluster on root endpoint
-    cluster::diagnostic_logs::config_t diag_logs_config;
-    endpoint_t *root_ep = endpoint::get(node, 0); // get the root node ep
-    cluster::diagnostic_logs::create(root_ep, &diag_logs_config, CLUSTER_FLAG_SERVER);
-
     extended_color_light::config_t light_config;
     light_config.on_off.on_off = DEFAULT_POWER;
     light_config.on_off.lighting.start_up_on_off = nullptr;
     light_config.level_control.current_level = DEFAULT_BRIGHTNESS;
+    light_config.level_control.on_level = DEFAULT_BRIGHTNESS;
     light_config.level_control.lighting.start_up_current_level = DEFAULT_BRIGHTNESS;
     light_config.color_control.color_mode = (uint8_t)ColorControl::ColorMode::kColorTemperature;
     light_config.color_control.enhanced_color_mode = (uint8_t)ColorControl::ColorMode::kColorTemperature;
@@ -187,17 +198,23 @@ extern "C" void app_main()
     ESP_LOGI(TAG, "Light created with endpoint_id %d", light_endpoint_id);
 
     /* Mark deferred persistence for some attributes that might be changed rapidly */
-    cluster_t *level_control_cluster = cluster::get(endpoint, LevelControl::Id);
-    attribute_t *current_level_attribute = attribute::get(level_control_cluster, LevelControl::Attributes::CurrentLevel::Id);
+    attribute_t *current_level_attribute = attribute::get(light_endpoint_id, LevelControl::Id, LevelControl::Attributes::CurrentLevel::Id);
     attribute::set_deferred_persistence(current_level_attribute);
 
-    cluster_t *color_control_cluster = cluster::get(endpoint, ColorControl::Id);
-    attribute_t *current_x_attribute = attribute::get(color_control_cluster, ColorControl::Attributes::CurrentX::Id);
+    attribute_t *current_x_attribute = attribute::get(light_endpoint_id, ColorControl::Id, ColorControl::Attributes::CurrentX::Id);
     attribute::set_deferred_persistence(current_x_attribute);
-    attribute_t *current_y_attribute = attribute::get(color_control_cluster, ColorControl::Attributes::CurrentY::Id);
+    attribute_t *current_y_attribute = attribute::get(light_endpoint_id, ColorControl::Id, ColorControl::Attributes::CurrentY::Id);
     attribute::set_deferred_persistence(current_y_attribute);
-    attribute_t *color_temp_attribute = attribute::get(color_control_cluster, ColorControl::Attributes::ColorTemperatureMireds::Id);
+    attribute_t *color_temp_attribute = attribute::get(light_endpoint_id, ColorControl::Id, ColorControl::Attributes::ColorTemperatureMireds::Id);
     attribute::set_deferred_persistence(color_temp_attribute);
+
+#if CHIP_DEVICE_CONFIG_ENABLE_THREAD && CHIP_DEVICE_CONFIG_ENABLE_WIFI_STATION
+    // Enable secondary network interface
+    secondary_network_interface::config_t secondary_network_interface_config;
+    endpoint = endpoint::secondary_network_interface::create(node, &secondary_network_interface_config, ENDPOINT_FLAG_NONE, nullptr);
+    ABORT_APP_ON_FAILURE(endpoint != nullptr, ESP_LOGE(TAG, "Failed to create secondary network interface endpoint"));
+#endif
+
 
 #if CHIP_DEVICE_CONFIG_ENABLE_THREAD
     /* Set OpenThread platform config */
@@ -208,6 +225,15 @@ extern "C" void app_main()
     };
     set_openthread_platform_config(&config);
 #endif
+
+#ifdef CONFIG_ENABLE_SET_CERT_DECLARATION_API
+    auto * dac_provider = get_dac_provider();
+#ifdef CONFIG_SEC_CERT_DAC_PROVIDER
+    static_cast<ESP32SecureCertDACProvider *>(dac_provider)->SetCertificationDeclaration(cdSpan);
+#elif defined(CONFIG_FACTORY_PARTITION_DAC_PROVIDER)
+    static_cast<ESP32FactoryDataProvider *>(dac_provider)->SetCertificationDeclaration(cdSpan);
+#endif
+#endif // CONFIG_ENABLE_SET_CERT_DECLARATION_API
 
     /* Matter start */
     err = esp_matter::start(app_event_cb);
@@ -224,16 +250,10 @@ extern "C" void app_main()
 #if CONFIG_ENABLE_CHIP_SHELL
     esp_matter::console::diagnostics_register_commands();
     esp_matter::console::wifi_register_commands();
+    esp_matter::console::factoryreset_register_commands();
 #if CONFIG_OPENTHREAD_CLI
     esp_matter::console::otcli_register_commands();
 #endif
     esp_matter::console::init();
 #endif
-}
-
-using namespace chip::app::Clusters::DiagnosticLogs;
-void emberAfDiagnosticLogsClusterInitCallback(chip::EndpointId endpoint)
-{
-    auto & logProvider = LogProvider::GetInstance();
-    DiagnosticLogsServer::Instance().SetDiagnosticLogsProviderDelegate(endpoint, &logProvider);
 }

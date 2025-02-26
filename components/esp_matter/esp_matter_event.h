@@ -30,6 +30,7 @@ namespace access_control {
 namespace event {
 event_t *create_access_control_entry_changed(cluster_t *cluster);
 event_t *create_access_control_extension_changed(cluster_t *cluster);
+event_t *create_fabric_restriction_review_update(cluster_t *cluster);
 } // namespace event
 } // namespace access_control
 
@@ -39,6 +40,12 @@ event_t *create_state_changed(cluster_t *cluster);
 event_t *create_action_failed(cluster_t *cluster);
 } // namespace event
 } // namespace actions
+
+namespace bridged_device_basic_information {
+namespace event {
+event_t *create_active_changed(cluster_t *cluster);
+} // namespace event
+} // namespace bridged_device_basic_information
 
 namespace basic_information {
 namespace event {
@@ -66,20 +73,20 @@ event_t *create_boot_reason(cluster_t *cluster);
 } // namespace event
 } // namespace general_diagnostics
 
-namespace diagnostics_network_wifi {
+namespace wifi_network_diagnotics {
 namespace event {
 event_t *create_disconnection(cluster_t *cluster);
 event_t *create_association_failure(cluster_t *cluster);
 event_t *create_connection_status(cluster_t *cluster);
 } // namespace event
-} // namespace diagnostics_network_wifi
+} // namespace wifi_network_diagnotics
 
-namespace diagnostics_network_thread {
+namespace thread_network_diagnostics {
 namespace event {
 event_t *create_connection_status(cluster_t *cluster);
 event_t *create_network_fault_change(cluster_t *cluster);
 } // namespace event
-} // namespace diagnostics_network_thread
+} // namespace thread_network_diagnostics
 
 namespace software_diagnostics {
 namespace event {
@@ -206,6 +213,41 @@ event_t *create_cumulative_energy_measured(cluster_t *cluster);
 event_t *create_periodic_energy_measured(cluster_t *cluster);
 } // namespace event
 } // namespace electrical_energy_measurement
+
+namespace valve_configuration_and_control {
+namespace event {
+event_t *create_valve_state_changed(cluster_t *cluster);
+event_t *create_valve_fault(cluster_t *cluster);
+} // namespace event
+} // namespace valve_configuration_and_control
+
+namespace device_energy_management {
+namespace event {
+event_t *create_power_adjust_start(cluster_t *cluster);
+event_t *create_power_adjust_end(cluster_t *cluster);
+event_t *create_paused(cluster_t *cluster);
+event_t *create_resumed(cluster_t *cluster);
+} // namespace event
+} // namespace device_energy_management
+
+namespace water_heater_management {
+namespace event {
+event_t *create_boost_started(cluster_t *cluster);
+event_t *create_boost_ended(cluster_t *cluster);
+} // namespace event
+} // namespace water_heater_management
+
+namespace commissioner_control {
+namespace event {
+event_t *create_commissioning_request_result(cluster_t *cluster);
+} // namespace event
+} // namespace commissioner_control
+
+namespace occupancy_sensing {
+namespace event {
+event_t *create_occupancy_changed(cluster_t *cluster);
+} // namespace event
+} // namespace occupancy_sensing
 
 } // namespace cluster
 } // namespace esp_matter

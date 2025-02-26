@@ -12,15 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <app/server/Server.h>
 #include <controller/CommissioneeDeviceProxy.h>
 #include <esp_log.h>
+#include <esp_matter_client.h>
 #include <esp_matter_controller_client.h>
 #include <esp_matter_controller_read_command.h>
 
-#include "DataModelLogger.h"
+#include <app/server/Server.h>
+
+#include <commands/clusters/DataModelLogger.h>
 
 using namespace chip::app::Clusters;
+using namespace esp_matter::client;
 using chip::DeviceProxy;
 using chip::app::InteractionModelEngine;
 using chip::app::ReadClient;
@@ -35,30 +38,11 @@ void read_command::on_device_connected_fcn(void *context, ExchangeManager &excha
                                            const SessionHandle &sessionHandle)
 {
     read_command *cmd = (read_command *)context;
-    ReadPrepareParams params(sessionHandle);
-
-    if (cmd->m_attr_paths.AllocatedSize() == 0 && cmd->m_event_paths.AllocatedSize() == 0) {
-        ESP_LOGE(TAG, "Cannot send the read command with NULL attribute path and NULL event path");
-        chip::Platform::Delete(cmd);
-        return;
-    }
-    params.mpAttributePathParamsList = cmd->m_attr_paths.Get();
-    params.mAttributePathParamsListSize = cmd->m_attr_paths.AllocatedSize();
-    params.mpEventPathParamsList = cmd->m_event_paths.Get();
-    params.mEventPathParamsListSize = cmd->m_event_paths.AllocatedSize();
-    params.mIsFabricFiltered = 0;
-    params.mpDataVersionFilterList = nullptr;
-    params.mDataVersionFilterListSize = 0;
-
-    ReadClient *client = chip::Platform::New<ReadClient>(InteractionModelEngine::GetInstance(), &exchangeMgr,
-                                                         cmd->m_buffered_read_cb, ReadClient::InteractionType::Read);
-    if (!client) {
-        ESP_LOGE(TAG, "Failed to alloc memory for read client");
-        chip::Platform::Delete(cmd);
-    }
-    if (CHIP_NO_ERROR != client->SendRequest(params)) {
-        ESP_LOGE(TAG, "Failed to send read request");
-        chip::Platform::Delete(client);
+    chip::OperationalDeviceProxy device_proxy(&exchangeMgr, sessionHandle);
+    esp_err_t err = interaction::read::send_request(&device_proxy, cmd->m_attr_paths.Get(),
+                                                    cmd->m_attr_paths.AllocatedSize(), cmd->m_event_paths.Get(),
+                                                    cmd->m_event_paths.AllocatedSize(), cmd->m_buffered_read_cb);
+    if (err != ESP_OK) {
         chip::Platform::Delete(cmd);
     }
     return;
@@ -168,7 +152,6 @@ void read_command::OnDone(ReadClient *apReadClient)
     if (read_done_cb) {
         read_done_cb(m_node_id, m_attr_paths, m_event_paths);
     }
-    chip::Platform::Delete(apReadClient);
     chip::Platform::Delete(this);
 }
 
@@ -244,6 +227,10 @@ esp_err_t send_read_attr_command(uint64_t node_id, uint16_t endpoint_id, uint32_
     attribute_ids.Alloc(1);
     if (!(endpoint_ids.Get() && cluster_ids.Get() && attribute_ids.Get())) {
         return ESP_ERR_NO_MEM;
+    } else {
+        *endpoint_ids.Get() = endpoint_id;
+        *cluster_ids.Get() = cluster_id;
+        *attribute_ids.Get() = attribute_id;
     }
     return send_read_attr_command(node_id, endpoint_ids, cluster_ids, attribute_ids);
 }
@@ -258,6 +245,10 @@ esp_err_t send_read_event_command(uint64_t node_id, uint16_t endpoint_id, uint32
     event_ids.Alloc(1);
     if (!(endpoint_ids.Get() && cluster_ids.Get() && event_ids.Get())) {
         return ESP_ERR_NO_MEM;
+    } else {
+        *endpoint_ids.Get() = endpoint_id;
+        *cluster_ids.Get() = cluster_id;
+        *event_ids.Get() = event_id;
     }
     return send_read_event_command(node_id, endpoint_ids, cluster_ids, event_ids);
 }

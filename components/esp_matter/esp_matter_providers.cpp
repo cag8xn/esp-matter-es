@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include <credentials/examples/DeviceAttestationCredsExample.h>
+#include <esp_log.h>
 #include <esp_matter_providers.h>
 #include <platform/ESP32/ESP32DeviceInfoProvider.h>
 #include <platform/ESP32/ESP32FactoryDataProvider.h>
@@ -70,7 +71,7 @@ void set_custom_device_info_provider(DeviceInfoProvider *provider)
 }
 #endif
 
-static DeviceAttestationCredentialsProvider *get_dac_provider(void)
+DeviceAttestationCredentialsProvider *get_dac_provider(void)
 {
 #if CONFIG_SEC_CERT_DAC_PROVIDER
     static ESP32SecureCertDACProvider instance;
@@ -83,8 +84,10 @@ static DeviceAttestationCredentialsProvider *get_dac_provider(void)
     } else {
         ESP_LOGE(TAG, "custom_dac_provider cannot be NULL");
     }
-#endif
+#elif CONFIG_EXAMPLE_DAC_PROVIDER
     return chip::Credentials::Examples::GetExampleDACProvider();
+#endif
+    return NULL;
 }
 
 void setup_providers()

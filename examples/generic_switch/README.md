@@ -3,81 +3,57 @@
 This example creates a Generic Switch device using the ESP
 Matter data model.
 This example demonstrates the use of few optional data model elements like :
-- Fixed Label Cluster : provides a feature for the device to tag an endpoint with zero or more read only labels (demonstrated through nvs).
-- User Label Cluster : This cluster provides a feature to tag an endpoint with zero or more labels.
 - Taglist Feature of Descriptor Cluster : used to disambiguate sibling endpoints where two or more sibling
   endpoints have an overlap in the supported device types with each such endpoint having a unique TagList.
 
-
-Note:
-    In order to retrieve the label-list from the fixed-label cluster the two options:
-    ``CONFIG_ENABLE_ESP32_FACTORY_DATA_PROVIDER`` and ``CONFIG_ENABLE_ESP32_DEVICE_INFO_PROVIDER`` have been set through sdkconfig.defaults.
 
 See the [docs](https://docs.espressif.com/projects/esp-matter/en/latest/esp32/developing.html) for more information about building and flashing the firmware.
 
 ## 1. Additional Environment Setup
 
-The steps below should be followed in order to access the fixed-labels.
--   If monitoring the device using ``idf.py monitor``,press `` Ctrl + ]`` to stop the process.
--   The following command must be executed to flash the mfg partition:
+### 1.1 Building the firmware
 
-```
-esptool.py -p [port-name] write_flash 0x10000 mfg_binaries/20202020_3841.bin
-```
+There are two types of switches in the example which can be configured
+through menuconfig:
 
--   Execute the command ``idf.py monitor``
--   Commission the device with ``discriminator: 3841``and `` passcode: 20202020``
+- idf.py menuconfig -> Demo -> Generic Switch Type
+- To use latching switch, enable `GENERIC_SWITCH_TYPE_LATCHING`.
+- To use a momentary switch, enable `GENERIC_SWITCH_TYPE_MOMENTARY`.
+- By default momentary switch i.e `GENERIC_SWITCH_TYPE_MOMENTARY` is enabled.
 
-    ```
-    chip-tool pairing ble-wifi 0x7283 [ssid] [password] 20202020 3841
-    ```
+### 1.2 Enabling insights (Optional)
 
-- Alternatively, below QR Code or Manual pairing code can be used for commissioning
-    - Manualcode : 34970012334
-    - QRCode     :
-    - ![QRCode](mfg_binaries/matter_qrcode_20202020_3841.png)
+Follow the steps mentioned [here](https://docs.espressif.com/projects/esp-matter/en/latest/esp32/insights.html)
 
--   To read the fixed-labels, use chip-tool.
+## 2.Commissioning and Control
+-   Commission the device with ``discriminator: 3840``and `` passcode: 20202021``
 
     ```
-    chip-tool fixedlabel read label-list 0x7283 1
+    chip-tool pairing ble-wifi 0x7283 [ssid] [password] 20202021 3840
     ```
-
-The example command given below should be executed to write to the label-list of User Label Cluster.
-
-```
-chip-tool userlabel write label-list '[{"label":"room", "value":"bedroom 1"}, {"label":"orientation", "value":"east"}]' 0x7283 1
-```
-
-To read label-list of User Label Cluster execute the command given below.
-
-```
-chip-tool userlabel read label-list 0x7283 1
-```
-
-### Using the TagList Feature
+### 2.1 Using the TagList Feature
 
 To read the taglist of the Descriptor cluster execute the command given below.
 
 ```
-chip-tool descriptor read tag-list 0x7283 0
+chip-tool descriptor read tag-list 0x7283 1
 ```
 
-## 2. Post Commissioning Setup
+## 3. Post Commissioning Setup
 
 This should be followed by: Commission the generic switch device
 -   Turn on chip-tool interactive mode.	``./chip-tool interactive start``
--   By default latching switch is enabled so subscribe to switch-latched event via chip-tool.
-    ``switch subscribe-event switch-latched <min-interval> <max-interval> <destination-id> <endpoint-id>``
+-   By default momentary switch is enabled so subscribe to long-press event via chip-tool.
+    ``switch subscribe-event long-press <min-interval> <max-interval> <destination-id> <endpoint-id>``
 -   `Double press the boot button` on device so that client will receive event after max-interval.
 
-### 2.1 Latching switch
+### 3.1 Latching switch
 
 Following are latching switch events mapped with boot button on device.
 
 -   `Double Press` -----------> `switch-latched`
 
-### 2.2 Momentary switch
+### 3.2 Momentary switch
 
 Following are momentary switch events mapped with boot button on device.
 

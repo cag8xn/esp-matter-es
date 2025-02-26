@@ -1,3 +1,14 @@
+# SPDX-FileCopyrightText: 2021 Project CHIP Authors
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+# SPDX-FileContributor: 2024 Espressif Systems (Shanghai) PTE LTD
+#
+# Modified the original code to support blemesh platform on ESP32 SoCs.
+#
+# For original code and license information, please refer to
+# https://github.com/project-chip/connectedhomeip
+
 # Copyright (c) 2021 Project CHIP Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -172,8 +183,8 @@ static_library("ESP32_custom") {
     ]
     if (chip_mdns == "platform") {
       sources += [
-        "WiFiDnssdImpl.cpp",
-        "WiFiDnssdImpl.h",
+        "ESP32DnssdImpl.cpp",
+        "ESP32DnssdImpl.h",
       ]
     }
     if (chip_mdns == "minimal") {
@@ -230,6 +241,8 @@ static_library("ESP32_custom") {
     sources += [
       "ESP32DeviceInfoProvider.cpp",
       "ESP32DeviceInfoProvider.h",
+      "StaticESP32DeviceInfoProvider.cpp",
+      "StaticESP32DeviceInfoProvider.h",
     ]
   }
 

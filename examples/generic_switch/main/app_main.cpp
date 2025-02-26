@@ -15,6 +15,7 @@
 #include <esp_matter_ota.h>
 
 #include <common_macros.h>
+#include <enable_esp_insights.h>
 #include <app_priv.h>
 #include <app_reset.h>
 #include <app/util/attribute-storage.h>
@@ -34,6 +35,11 @@ using namespace esp_matter::endpoint;
 using namespace esp_matter::cluster;
 using namespace chip::app::Clusters;
 
+#if CONFIG_ENABLE_ESP_INSIGHTS_TRACE
+extern const char insights_auth_key_start[] asm("_binary_insights_auth_key_txt_start");
+extern const char insights_auth_key_end[] asm("_binary_insights_auth_key_txt_end");
+#endif
+
 namespace {
 // Please refer to https://github.com/CHIP-Specifications/connectedhomeip-spec/blob/master/src/namespaces
 constexpr const uint8_t kNamespaceSwitches = 43;
@@ -48,10 +54,10 @@ constexpr const uint8_t kTagPositionLeft = 0;
 // Common Position Namespace: 8, tag: 1 (Right)
 constexpr const uint8_t kTagPositionRight = 1;
 
-const Descriptor::Structs::SemanticTagStruct::Type gEp0TagList[] = {
+const Descriptor::Structs::SemanticTagStruct::Type gEp1TagList[] = {
     {.namespaceID = kNamespaceSwitches, .tag = kTagSwitchOn},
     {.namespaceID = kNamespacePosition, .tag = kTagPositionRight}};
-const Descriptor::Structs::SemanticTagStruct::Type gEp1TagList[] = {
+const Descriptor::Structs::SemanticTagStruct::Type gEp2TagList[] = {
     {.namespaceID = kNamespaceSwitches, .tag = kTagSwitchOff},
     {.namespaceID = kNamespacePosition, .tag = kTagPositionLeft}};
 
@@ -164,12 +170,6 @@ static esp_err_t create_button(struct gpio_button* button, node_t* node)
     generic_switch_endpoint_id = endpoint::get_id(endpoint);
     ESP_LOGI(TAG, "Generic Switch created with endpoint_id %d", generic_switch_endpoint_id);
 
-    cluster::fixed_label::config_t fl_config;
-    cluster_t *fl_cluster = cluster::fixed_label::create(endpoint, &fl_config, CLUSTER_FLAG_SERVER);
-
-    cluster::user_label::config_t ul_config;
-    cluster_t *ul_cluster = cluster::user_label::create(endpoint, &ul_config, CLUSTER_FLAG_SERVER);
-
     /* Add additional features to the node */
     cluster_t *cluster = cluster::get(endpoint, Switch::Id);
 
@@ -179,6 +179,10 @@ static esp_err_t create_button(struct gpio_button* button, node_t* node)
 
 #if CONFIG_GENERIC_SWITCH_TYPE_MOMENTARY
     cluster::switch_cluster::feature::momentary_switch::add(cluster);
+    cluster::switch_cluster::feature::action_switch::add(cluster);
+    cluster::switch_cluster::feature::momentary_switch_multi_press::config_t msm;
+    msm.multi_press_max = 5;
+    cluster::switch_cluster::feature::momentary_switch_multi_press::add(cluster, &msm);
 #endif
 
     return err;
@@ -231,30 +235,17 @@ extern "C" void app_main()
     err = esp_matter::start(app_event_cb);
     ABORT_APP_ON_FAILURE(err == ESP_OK, ESP_LOGE(TAG, "Failed to start Matter, err:%d", err));
 
-    SetTagList(0, chip::Span<const Descriptor::Structs::SemanticTagStruct::Type>(gEp0TagList));
+#if CONFIG_ENABLE_ESP_INSIGHTS_TRACE
+    enable_insights(insights_auth_key_start);
+#endif
+
     SetTagList(1, chip::Span<const Descriptor::Structs::SemanticTagStruct::Type>(gEp1TagList));
-
-    nvs_handle_t handle;
-    nvs_open_from_partition(CONFIG_CHIP_FACTORY_NAMESPACE_PARTITION_LABEL, "chip-factory", NVS_READWRITE, &handle);
-    ABORT_APP_ON_FAILURE(err == ESP_OK, ESP_LOGE(TAG, "Failed to open namespace:chip-factory from partition:"
-                                                    CONFIG_CHIP_FACTORY_NAMESPACE_PARTITION_LABEL ", err:%d", err));
-
-    int32_t out_value = 0;
-    if (nvs_get_i32(handle, "fl-sz/1", &out_value) == ESP_ERR_NVS_NOT_FOUND)
-    {
-       nvs_set_i32(handle, "fl-sz/1", 2);
-       nvs_set_str(handle, "fl-k/1/0", "myEP1LBL1");
-       nvs_set_str(handle, "fl-v/1/0", "valEP1LBL1");
-       nvs_set_str(handle, "fl-k/1/1", "myEP1LBL2");
-       nvs_set_str(handle, "fl-v/1/1", "valEP1LBL2");
-    }
-
-    nvs_commit(handle);
-    nvs_close(handle);
+    SetTagList(2, chip::Span<const Descriptor::Structs::SemanticTagStruct::Type>(gEp2TagList));
 
 #if CONFIG_ENABLE_CHIP_SHELL
     esp_matter::console::diagnostics_register_commands();
     esp_matter::console::wifi_register_commands();
+    esp_matter::console::factoryreset_register_commands();
     esp_matter::console::init();
 #endif
 

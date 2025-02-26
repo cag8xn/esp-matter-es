@@ -19,7 +19,7 @@
 
 #include <app-common/zap-generated/callback.h>
 #include <app/InteractionModelEngine.h>
-#include <app/util/af.h>
+#include <app/clusters/mode-base-server/mode-base-cluster-objects.h>
 
 using namespace chip::app::Clusters;
 using chip::app::CommandHandler;
@@ -33,6 +33,8 @@ static const char *TAG = "esp_matter_command";
 namespace esp_matter {
 namespace command {
 
+static callback_t get_cluster_accepted_command(uint32_t cluster_id, uint32_t command_id);
+
 void DispatchSingleClusterCommandCommon(const ConcreteCommandPath &command_path, TLVReader &tlv_data, void *opaque_ptr)
 {
     uint16_t endpoint_id = command_path.mEndpointId;
@@ -40,34 +42,36 @@ void DispatchSingleClusterCommandCommon(const ConcreteCommandPath &command_path,
     uint32_t command_id = command_path.mCommandId;
     ESP_LOGI(TAG, "Received command 0x%08" PRIX32 " for endpoint 0x%04" PRIX16 "'s cluster 0x%08" PRIX32 "", command_id, endpoint_id, cluster_id);
 
-    node_t *node = node::get();
-    endpoint_t *endpoint = endpoint::get(node, endpoint_id);
-    cluster_t *cluster = cluster::get(endpoint, cluster_id);
+    cluster_t *cluster = cluster::get(endpoint_id, cluster_id);
+    VerifyOrReturn(cluster);
     command_t *command = get(cluster, command_id, COMMAND_FLAG_ACCEPTED);
-    if (!command) {
-        ESP_LOGE(TAG, "Command 0x%08" PRIX32 " not found", command_id);
-        return;
-    }
+    callback_t standard_callback = get_cluster_accepted_command(cluster_id, command_id);
+    VerifyOrReturn((command || standard_callback), ESP_LOGE(TAG, "Command 0x%08" PRIX32 " not found", command_id));
     esp_err_t err = ESP_OK;
     TLVReader tlv_reader;
     tlv_reader.Init(tlv_data);
-    callback_t callback = get_user_callback(command);
-    if (callback) {
-        err = callback(command_path, tlv_reader, opaque_ptr);
+    if (standard_callback) {
+        standard_callback(command_path, tlv_data, opaque_ptr);
     }
-    callback = get_callback(command);
-    if ((err == ESP_OK) && callback) {
-        err = callback(command_path, tlv_data, opaque_ptr);
-    }
-    int flags = get_flags(command);
-    if (flags & COMMAND_FLAG_CUSTOM) {
-        chip::app::CommandHandler *command_obj = (chip::app::CommandHandler *)opaque_ptr;
-        if (!command_obj) {
-            ESP_LOGE(TAG, "Command Object cannot be NULL");
-            return;
+    if (command) {
+        callback_t callback = get_user_callback(command);
+        if (callback) {
+            err = callback(command_path, tlv_reader, opaque_ptr);
         }
-        command_obj->AddStatus(command_path, err == ESP_OK ? chip::Protocols::InteractionModel::Status::Success :
-                                                             chip::Protocols::InteractionModel::Status::Failure);
+        callback = get_callback(command);
+        if ((err == ESP_OK) && callback) {
+            err = callback(command_path, tlv_data, opaque_ptr);
+        }
+        int flags = get_flags(command);
+        if (flags & COMMAND_FLAG_CUSTOM) {
+            chip::app::CommandHandler *command_obj = (chip::app::CommandHandler *)opaque_ptr;
+            if (!command_obj) {
+                ESP_LOGE(TAG, "Command Object cannot be NULL");
+                return;
+            }
+            command_obj->AddStatus(command_path, err == ESP_OK ? chip::Protocols::InteractionModel::Status::Success :
+                                                                chip::Protocols::InteractionModel::Status::Failure);
+        }
     }
 }
 
@@ -127,41 +131,6 @@ static esp_err_t esp_matter_command_callback_key_set_read_all_indices(const Conc
     if (error == CHIP_NO_ERROR) {
         emberAfGroupKeyManagementClusterKeySetReadAllIndicesCallback((CommandHandler *)opaque_ptr, command_path,
                                                                      command_data);
-    }
-    return ESP_OK;
-}
-
-static esp_err_t esp_matter_command_callback_arm_fail_safe(const ConcreteCommandPath &command_path, TLVReader &tlv_data,
-                                                           void *opaque_ptr)
-{
-    chip::app::Clusters::GeneralCommissioning::Commands::ArmFailSafe::DecodableType command_data;
-    CHIP_ERROR error = Decode(tlv_data, command_data);
-    if (error == CHIP_NO_ERROR) {
-        emberAfGeneralCommissioningClusterArmFailSafeCallback((CommandHandler *)opaque_ptr, command_path, command_data);
-    }
-    return ESP_OK;
-}
-
-static esp_err_t esp_matter_command_callback_set_regulatory_config(const ConcreteCommandPath &command_path,
-                                                                   TLVReader &tlv_data, void *opaque_ptr)
-{
-    chip::app::Clusters::GeneralCommissioning::Commands::SetRegulatoryConfig::DecodableType command_data;
-    CHIP_ERROR error = Decode(tlv_data, command_data);
-    if (error == CHIP_NO_ERROR) {
-        emberAfGeneralCommissioningClusterSetRegulatoryConfigCallback((CommandHandler *)opaque_ptr, command_path,
-                                                                      command_data);
-    }
-    return ESP_OK;
-}
-
-static esp_err_t esp_matter_command_callback_commissioning_complete(const ConcreteCommandPath &command_path,
-                                                                    TLVReader &tlv_data, void *opaque_ptr)
-{
-    chip::app::Clusters::GeneralCommissioning::Commands::CommissioningComplete::DecodableType command_data;
-    CHIP_ERROR error = Decode(tlv_data, command_data);
-    if (error == CHIP_NO_ERROR) {
-        emberAfGeneralCommissioningClusterCommissioningCompleteCallback((CommandHandler *)opaque_ptr, command_path,
-                                                                        command_data);
     }
     return ESP_OK;
 }
@@ -888,6 +857,215 @@ static esp_err_t esp_matter_command_callback_unlock_door(const ConcreteCommandPa
     return ESP_OK;
 }
 
+static esp_err_t esp_matter_command_callback_unlock_with_timeout(const ConcreteCommandPath &command_path,
+                                                                 TLVReader &tlv_data, void *opaque_ptr)
+{
+    chip::app::Clusters::DoorLock::Commands::UnlockWithTimeout::DecodableType command_data;
+    CHIP_ERROR error = Decode(tlv_data, command_data);
+    if (error == CHIP_NO_ERROR) {
+        emberAfDoorLockClusterUnlockWithTimeoutCallback((CommandHandler *)opaque_ptr, command_path, command_data);
+    }
+    return ESP_OK;
+}
+
+static esp_err_t esp_matter_command_callback_set_weekday_schedule(const ConcreteCommandPath &command_path,
+                                                                  TLVReader &tlv_data, void *opaque_ptr)
+{
+    chip::app::Clusters::DoorLock::Commands::SetWeekDaySchedule::DecodableType command_data;
+    CHIP_ERROR error = Decode(tlv_data, command_data);
+    if (error == CHIP_NO_ERROR) {
+        emberAfDoorLockClusterSetWeekDayScheduleCallback((CommandHandler *)opaque_ptr, command_path, command_data);
+    }
+    return ESP_OK;
+}
+
+static esp_err_t esp_matter_command_callback_get_weekday_schedule(const ConcreteCommandPath &command_path,
+                                                                  TLVReader &tlv_data, void *opaque_ptr)
+{
+    chip::app::Clusters::DoorLock::Commands::GetWeekDaySchedule::DecodableType command_data;
+    CHIP_ERROR error = Decode(tlv_data, command_data);
+    if (error == CHIP_NO_ERROR) {
+        emberAfDoorLockClusterGetWeekDayScheduleCallback((CommandHandler *)opaque_ptr, command_path, command_data);
+    }
+    return ESP_OK;
+}
+
+static esp_err_t esp_matter_command_callback_clear_weekday_schedule(const ConcreteCommandPath &command_path,
+                                                                    TLVReader &tlv_data, void *opaque_ptr)
+{
+    chip::app::Clusters::DoorLock::Commands::ClearWeekDaySchedule::DecodableType command_data;
+    CHIP_ERROR error = Decode(tlv_data, command_data);
+    if (error == CHIP_NO_ERROR) {
+        emberAfDoorLockClusterClearWeekDayScheduleCallback((CommandHandler *)opaque_ptr, command_path, command_data);
+    }
+    return ESP_OK;
+}
+
+static esp_err_t esp_matter_command_callback_set_year_day_schedule(const ConcreteCommandPath &command_path,
+                                                                   TLVReader &tlv_data, void *opaque_ptr)
+{
+    chip::app::Clusters::DoorLock::Commands::SetYearDaySchedule::DecodableType command_data;
+    CHIP_ERROR error = Decode(tlv_data, command_data);
+    if (error == CHIP_NO_ERROR) {
+        emberAfDoorLockClusterSetYearDayScheduleCallback((CommandHandler *)opaque_ptr, command_path, command_data);
+    }
+    return ESP_OK;
+}
+
+static esp_err_t esp_matter_command_callback_get_year_day_schedule(const ConcreteCommandPath &command_path,
+                                                                   TLVReader &tlv_data, void *opaque_ptr)
+{
+    chip::app::Clusters::DoorLock::Commands::GetYearDaySchedule::DecodableType command_data;
+    CHIP_ERROR error = Decode(tlv_data, command_data);
+    if (error == CHIP_NO_ERROR) {
+        emberAfDoorLockClusterGetYearDayScheduleCallback((CommandHandler *)opaque_ptr, command_path, command_data);
+    }
+    return ESP_OK;
+}
+
+static esp_err_t esp_matter_command_callback_clear_year_day_schedule(const ConcreteCommandPath &command_path,
+                                                                     TLVReader &tlv_data, void *opaque_ptr)
+{
+    chip::app::Clusters::DoorLock::Commands::ClearYearDaySchedule::DecodableType command_data;
+    CHIP_ERROR error = Decode(tlv_data, command_data);
+    if (error == CHIP_NO_ERROR) {
+        emberAfDoorLockClusterClearYearDayScheduleCallback((CommandHandler *)opaque_ptr, command_path, command_data);
+    }
+    return ESP_OK;
+}
+
+static esp_err_t esp_matter_command_callback_set_holiday_schedule(const ConcreteCommandPath &command_path,
+                                                                  TLVReader &tlv_data, void *opaque_ptr)
+{
+    chip::app::Clusters::DoorLock::Commands::SetHolidaySchedule::DecodableType command_data;
+    CHIP_ERROR error = Decode(tlv_data, command_data);
+    if (error == CHIP_NO_ERROR) {
+        emberAfDoorLockClusterSetHolidayScheduleCallback((CommandHandler *)opaque_ptr, command_path, command_data);
+    }
+    return ESP_OK;
+}
+
+static esp_err_t esp_matter_command_callback_get_holiday_schedule(const ConcreteCommandPath &command_path,
+                                                                  TLVReader &tlv_data, void *opaque_ptr)
+{
+    chip::app::Clusters::DoorLock::Commands::GetHolidaySchedule::DecodableType command_data;
+    CHIP_ERROR error = Decode(tlv_data, command_data);
+    if (error == CHIP_NO_ERROR) {
+        emberAfDoorLockClusterGetHolidayScheduleCallback((CommandHandler *)opaque_ptr, command_path, command_data);
+    }
+    return ESP_OK;
+}
+
+static esp_err_t esp_matter_command_callback_clear_holiday_schedule(const ConcreteCommandPath &command_path,
+                                                                    TLVReader &tlv_data, void *opaque_ptr)
+{
+    chip::app::Clusters::DoorLock::Commands::ClearHolidaySchedule::DecodableType command_data;
+    CHIP_ERROR error = Decode(tlv_data, command_data);
+    if (error == CHIP_NO_ERROR) {
+        emberAfDoorLockClusterClearHolidayScheduleCallback((CommandHandler *)opaque_ptr, command_path, command_data);
+    }
+    return ESP_OK;
+}
+
+static esp_err_t esp_matter_command_callback_set_user(const ConcreteCommandPath &command_path, TLVReader &tlv_data,
+                                                      void *opaque_ptr)
+{
+    chip::app::Clusters::DoorLock::Commands::SetUser::DecodableType command_data;
+    CHIP_ERROR error = Decode(tlv_data, command_data);
+    if (error == CHIP_NO_ERROR) {
+        emberAfDoorLockClusterSetUserCallback((CommandHandler *)opaque_ptr, command_path, command_data);
+    }
+    return ESP_OK;
+}
+
+static esp_err_t esp_matter_command_callback_get_user(const ConcreteCommandPath &command_path, TLVReader &tlv_data,
+                                                      void *opaque_ptr)
+{
+    chip::app::Clusters::DoorLock::Commands::GetUser::DecodableType command_data;
+    CHIP_ERROR error = Decode(tlv_data, command_data);
+    if (error == CHIP_NO_ERROR) {
+        emberAfDoorLockClusterGetUserCallback((CommandHandler *)opaque_ptr, command_path, command_data);
+    }
+    return ESP_OK;
+}
+
+static esp_err_t esp_matter_command_callback_clear_user(const ConcreteCommandPath &command_path, TLVReader &tlv_data,
+                                                        void *opaque_ptr)
+{
+    chip::app::Clusters::DoorLock::Commands::ClearUser::DecodableType command_data;
+    CHIP_ERROR error = Decode(tlv_data, command_data);
+    if (error == CHIP_NO_ERROR) {
+        emberAfDoorLockClusterClearUserCallback((CommandHandler *)opaque_ptr, command_path, command_data);
+    }
+    return ESP_OK;
+}
+
+static esp_err_t esp_matter_command_callback_set_credential(const ConcreteCommandPath &command_path, TLVReader &tlv_data,
+                                                            void *opaque_ptr)
+{
+    chip::app::Clusters::DoorLock::Commands::SetCredential::DecodableType command_data;
+    CHIP_ERROR error = Decode(tlv_data, command_data);
+    if (error == CHIP_NO_ERROR) {
+        emberAfDoorLockClusterSetCredentialCallback((CommandHandler *)opaque_ptr, command_path, command_data);
+    }
+    return ESP_OK;
+}
+
+static esp_err_t esp_matter_command_callback_get_credential_status(const ConcreteCommandPath &command_path,
+                                                                   TLVReader &tlv_data, void *opaque_ptr)
+{
+    chip::app::Clusters::DoorLock::Commands::GetCredentialStatus::DecodableType command_data;
+    CHIP_ERROR error = Decode(tlv_data, command_data);
+    if (error == CHIP_NO_ERROR) {
+        emberAfDoorLockClusterGetCredentialStatusCallback((CommandHandler *)opaque_ptr, command_path, command_data);
+    }
+    return ESP_OK;
+}
+
+static esp_err_t esp_matter_command_callback_clear_credential(const ConcreteCommandPath &command_path, TLVReader &tlv_data,
+                                                              void *opaque_ptr)
+{
+    chip::app::Clusters::DoorLock::Commands::ClearCredential::DecodableType command_data;
+    CHIP_ERROR error = Decode(tlv_data, command_data);
+    if (error == CHIP_NO_ERROR) {
+        emberAfDoorLockClusterClearCredentialCallback((CommandHandler *)opaque_ptr, command_path, command_data);
+    }
+    return ESP_OK;
+}
+
+static esp_err_t esp_matter_command_callback_unbolt_door(const ConcreteCommandPath &command_path, TLVReader &tlv_data,
+                                                         void *opaque_ptr)
+{
+    chip::app::Clusters::DoorLock::Commands::UnboltDoor::DecodableType command_data;
+    CHIP_ERROR error = Decode(tlv_data, command_data);
+    if (error == CHIP_NO_ERROR) {
+        emberAfDoorLockClusterUnboltDoorCallback((CommandHandler *)opaque_ptr, command_path, command_data);
+    }
+    return ESP_OK;
+}
+
+static esp_err_t esp_matter_command_callback_set_aliro_reader_config(const ConcreteCommandPath &command_path, TLVReader &tlv_data,
+                                                         void *opaque_ptr)
+{
+    chip::app::Clusters::DoorLock::Commands::SetAliroReaderConfig::DecodableType command_data;
+    CHIP_ERROR error = Decode(tlv_data, command_data);
+    if (error == CHIP_NO_ERROR) {
+        emberAfDoorLockClusterSetAliroReaderConfigCallback((CommandHandler *)opaque_ptr, command_path, command_data);
+    }
+    return ESP_OK;
+}
+
+static esp_err_t esp_matter_command_callback_clear_aliro_reader_config(const ConcreteCommandPath &command_path, TLVReader &tlv_data,
+                                                         void *opaque_ptr)
+{
+    chip::app::Clusters::DoorLock::Commands::ClearAliroReaderConfig::DecodableType command_data;
+    CHIP_ERROR error = Decode(tlv_data, command_data);
+    if (error == CHIP_NO_ERROR) {
+        emberAfDoorLockClusterClearAliroReaderConfigCallback((CommandHandler *)opaque_ptr, command_path, command_data);
+    }
+    return ESP_OK;
+}
+
 static esp_err_t esp_matter_command_callback_setpoint_raise_lower(const ConcreteCommandPath &command_path,
                                                                   TLVReader &tlv_data, void *opaque_ptr)
 {
@@ -928,6 +1106,28 @@ static esp_err_t esp_matter_command_callback_clear_weekly_schedule(const Concret
     CHIP_ERROR error = Decode(tlv_data, command_data);
     if (error == CHIP_NO_ERROR) {
         emberAfThermostatClusterClearWeeklyScheduleCallback((CommandHandler *)opaque_ptr, command_path, command_data);
+    }
+    return ESP_OK;
+}
+
+static esp_err_t esp_matter_command_callback_set_active_schedule_request(const ConcreteCommandPath &command_path,
+                                                                  TLVReader &tlv_data, void *opaque_ptr)
+{
+    chip::app::Clusters::Thermostat::Commands::SetActiveScheduleRequest::DecodableType command_data;
+    CHIP_ERROR error = Decode(tlv_data, command_data);
+    if (error == CHIP_NO_ERROR) {
+        emberAfThermostatClusterSetActiveScheduleRequestCallback((CommandHandler *)opaque_ptr, command_path, command_data);
+    }
+    return ESP_OK;
+}
+
+static esp_err_t esp_matter_command_callback_set_active_preset_request(const ConcreteCommandPath &command_path,
+                                                                  TLVReader &tlv_data, void *opaque_ptr)
+{
+    chip::app::Clusters::Thermostat::Commands::SetActivePresetRequest::DecodableType command_data;
+    CHIP_ERROR error = Decode(tlv_data, command_data);
+    if (error == CHIP_NO_ERROR) {
+        emberAfThermostatClusterSetActivePresetRequestCallback((CommandHandler *)opaque_ptr, command_path, command_data);
     }
     return ESP_OK;
 }
@@ -1238,6 +1438,26 @@ static esp_err_t esp_matter_command_callback_disable_action_with_duration(const 
     return ESP_OK;
 }
 
+static esp_err_t esp_matter_command_callback_review_fabric_restrictions(const ConcreteCommandPath &command_path, TLVReader &tlv_data, void *opaque_ptr)
+{
+    chip::app::Clusters::AccessControl::Commands::ReviewFabricRestrictions::DecodableType command_data;
+    CHIP_ERROR error = Decode(tlv_data, command_data);
+    if (error == CHIP_NO_ERROR) {
+        emberAfAccessControlClusterReviewFabricRestrictionsCallback((CommandHandler *)opaque_ptr, command_path, command_data);
+    }
+    return ESP_OK;
+}
+
+static esp_err_t esp_matter_command_callback_keep_active(const ConcreteCommandPath &command_path, TLVReader &tlv_data, void *opaque_ptr)
+{
+    chip::app::Clusters::BridgedDeviceBasicInformation::Commands::KeepActive::DecodableType command_data;
+    CHIP_ERROR error = Decode(tlv_data, command_data);
+    if (error == CHIP_NO_ERROR) {
+        emberAfBridgedDeviceBasicInformationClusterKeepActiveCallback((CommandHandler *)opaque_ptr, command_path, command_data);
+    }
+    return ESP_OK;
+}
+
 static esp_err_t esp_matter_command_callback_send_key(const ConcreteCommandPath &command_path, TLVReader &tlv_data, void *opaque_ptr)
 {
     chip::app::Clusters::KeypadInput::Commands::SendKey::DecodableType command_data;
@@ -1264,6 +1484,82 @@ static esp_err_t esp_matter_command_callback_enable_disable_alarm(const Concrete
     CHIP_ERROR error = Decode(tlv_data, command_data);
     if (error == CHIP_NO_ERROR) {
         emberAfBooleanStateConfigurationClusterEnableDisableAlarmCallback((CommandHandler *)opaque_ptr, command_path, command_data);
+    }
+    return ESP_OK;
+}
+
+static esp_err_t esp_matter_command_callback_open(const ConcreteCommandPath &command_path, TLVReader &tlv_data, void *opaque_ptr)
+{
+    chip::app::Clusters::ValveConfigurationAndControl::Commands::Open::DecodableType command_data;
+    CHIP_ERROR error = Decode(tlv_data, command_data);
+    if (error == CHIP_NO_ERROR) {
+        emberAfValveConfigurationAndControlClusterOpenCallback((CommandHandler *)opaque_ptr, command_path, command_data);
+    }
+    return ESP_OK;
+}
+
+static esp_err_t esp_matter_command_callback_close(const ConcreteCommandPath &command_path, TLVReader &tlv_data, void *opaque_ptr)
+{
+    chip::app::Clusters::ValveConfigurationAndControl::Commands::Close::DecodableType command_data;
+    CHIP_ERROR error = Decode(tlv_data, command_data);
+    if (error == CHIP_NO_ERROR) {
+        emberAfValveConfigurationAndControlClusterCloseCallback((CommandHandler *)opaque_ptr, command_path, command_data);
+    }
+    return ESP_OK;
+}
+
+static esp_err_t esp_matter_command_callback_set_utc_time(const ConcreteCommandPath &command_path, TLVReader &tlv_data,
+                                                          void *opaque_ptr)
+{
+    chip::app::Clusters::TimeSynchronization::Commands::SetUTCTime::DecodableType command_data;
+    CHIP_ERROR error = Decode(tlv_data, command_data);
+    if (error == CHIP_NO_ERROR) {
+        emberAfTimeSynchronizationClusterSetUTCTimeCallback((CommandHandler *)opaque_ptr, command_path, command_data);
+    }
+    return ESP_OK;
+}
+
+static esp_err_t esp_matter_command_callback_set_trusted_time_source(const ConcreteCommandPath &command_path,
+                                                                     TLVReader &tlv_data, void *opaque_ptr)
+{
+    chip::app::Clusters::TimeSynchronization::Commands::SetTrustedTimeSource::DecodableType command_data;
+    CHIP_ERROR error = Decode(tlv_data, command_data);
+    if (error == CHIP_NO_ERROR) {
+        emberAfTimeSynchronizationClusterSetTrustedTimeSourceCallback((CommandHandler *)opaque_ptr, command_path,
+                                                                      command_data);
+    }
+    return ESP_OK;
+}
+
+static esp_err_t esp_matter_command_callback_set_time_zone(const ConcreteCommandPath &command_path, TLVReader &tlv_data,
+                                                           void *opaque_ptr)
+{
+    chip::app::Clusters::TimeSynchronization::Commands::SetTimeZone::DecodableType command_data;
+    CHIP_ERROR error = Decode(tlv_data, command_data);
+    if (error == CHIP_NO_ERROR) {
+        emberAfTimeSynchronizationClusterSetTimeZoneCallback((CommandHandler *)opaque_ptr, command_path, command_data);
+    }
+    return ESP_OK;
+}
+
+static esp_err_t esp_matter_command_callback_set_dst_offset(const ConcreteCommandPath &command_path, TLVReader &tlv_data,
+                                                            void *opaque_ptr)
+{
+    chip::app::Clusters::TimeSynchronization::Commands::SetDSTOffset::DecodableType command_data;
+    CHIP_ERROR error = Decode(tlv_data, command_data);
+    if (error == CHIP_NO_ERROR) {
+        emberAfTimeSynchronizationClusterSetDSTOffsetCallback((CommandHandler *)opaque_ptr, command_path, command_data);
+    }
+    return ESP_OK;
+}
+
+static esp_err_t esp_matter_command_callback_set_default_ntp(const ConcreteCommandPath &command_path, TLVReader &tlv_data,
+                                                             void *opaque_ptr)
+{
+    chip::app::Clusters::TimeSynchronization::Commands::SetDefaultNTP::DecodableType command_data;
+    CHIP_ERROR error = Decode(tlv_data, command_data);
+    if (error == CHIP_NO_ERROR) {
+        emberAfTimeSynchronizationClusterSetDefaultNTPCallback((CommandHandler *)opaque_ptr, command_path, command_data);
     }
     return ESP_OK;
 }
@@ -1348,7 +1644,34 @@ command_t *create_disable_action_with_duration(cluster_t *cluster)
 } /* command */
 } /* actions */
 
-namespace diagnostics_network_thread {
+namespace access_control {
+namespace command {
+command_t *create_review_fabric_restrictions(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, AccessControl::Commands::ReviewFabricRestrictions::Id, COMMAND_FLAG_ACCEPTED,
+                                       esp_matter_command_callback_review_fabric_restrictions);
+}
+
+command_t *create_review_fabric_restrictions_response(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, AccessControl::Commands::ReviewFabricRestrictionsResponse::Id, COMMAND_FLAG_GENERATED, NULL);
+}
+
+} /* command */
+} /* access_control */
+
+namespace bridged_device_basic_information {
+namespace command {
+command_t *create_keep_active(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, BridgedDeviceBasicInformation::Commands::KeepActive::Id, COMMAND_FLAG_ACCEPTED,
+                                       esp_matter_command_callback_keep_active);
+}
+
+} /* command */
+} /* bridged_device_basic_information */
+
+namespace thread_network_diagnostics {
 namespace command {
 
 command_t *create_reset_counts(cluster_t *cluster)
@@ -1358,9 +1681,9 @@ command_t *create_reset_counts(cluster_t *cluster)
 }
 
 } /* command */
-} /* diagnostics_network_thread */
+} /* thread_network_diagnostics */
 
-namespace diagnostics_network_wifi {
+namespace wifi_network_diagnotics {
 namespace command {
 
 command_t *create_reset_counts(cluster_t *cluster)
@@ -1370,9 +1693,9 @@ command_t *create_reset_counts(cluster_t *cluster)
 }
 
 } /* command */
-} /* diagnostics_network_wifi */
+} /* wifi_network_diagnotics */
 
-namespace diagnostics_network_ethernet {
+namespace ethernet_network_diagnostics {
 namespace command {
 
 command_t *create_reset_counts(cluster_t *cluster)
@@ -1382,7 +1705,7 @@ command_t *create_reset_counts(cluster_t *cluster)
 }
 
 } /* command */
-} /* diagnostics_network_ethernet */
+} /* ethernet_network_diagnostics */
 
 namespace diagnostic_logs {
 namespace command {
@@ -1404,6 +1727,17 @@ command_t *create_retrieve_logs_response(cluster_t *cluster)
 
 namespace general_diagnostics {
 namespace command {
+
+constexpr const command_entry_t accepted_command_list[] = {
+    {GeneralDiagnostics::Commands::TestEventTrigger::Id, COMMAND_FLAG_ACCEPTED,
+     esp_matter_command_callback_test_event_trigger},
+    {GeneralDiagnostics::Commands::TimeSnapshot::Id, COMMAND_FLAG_ACCEPTED,
+     esp_matter_command_callback_time_snap_shot},
+};
+
+constexpr const command_entry_t generated_command_list[] = {
+    {GeneralDiagnostics::Commands::TimeSnapshotResponse::Id, COMMAND_FLAG_GENERATED, NULL},
+};
 
 command_t *create_test_event_trigger(cluster_t *cluster)
 {
@@ -1440,6 +1774,18 @@ command_t *create_reset_watermarks(cluster_t *cluster)
 
 namespace group_key_management {
 namespace command {
+
+constexpr const command_entry_t accepted_command_list[] = {
+    {GroupKeyManagement::Commands::KeySetWrite::Id, COMMAND_FLAG_ACCEPTED, esp_matter_command_callback_key_set_write},
+    {GroupKeyManagement::Commands::KeySetRead::Id, COMMAND_FLAG_ACCEPTED, esp_matter_command_callback_key_set_read},
+    {GroupKeyManagement::Commands::KeySetRemove::Id, COMMAND_FLAG_ACCEPTED, esp_matter_command_callback_key_set_remove},
+    {GroupKeyManagement::Commands::KeySetReadAllIndices::Id, COMMAND_FLAG_ACCEPTED, esp_matter_command_callback_key_set_read_all_indices},
+};
+
+constexpr const command_entry_t generated_command_list[] = {
+    {GroupKeyManagement::Commands::KeySetReadResponse::Id, COMMAND_FLAG_GENERATED, NULL},
+    {GroupKeyManagement::Commands::KeySetReadAllIndicesResponse::Id, COMMAND_FLAG_GENERATED, NULL},
+};
 
 command_t *create_key_set_write(cluster_t *cluster)
 {
@@ -1483,22 +1829,34 @@ command_t *create_key_set_read_all_indices_response(cluster_t *cluster)
 namespace general_commissioning {
 namespace command {
 
+constexpr const command_entry_t accepted_command_list[] = {
+    {GeneralCommissioning::Commands::ArmFailSafe::Id, COMMAND_FLAG_ACCEPTED, nullptr},
+    {GeneralCommissioning::Commands::SetRegulatoryConfig::Id, COMMAND_FLAG_ACCEPTED, nullptr},
+    {GeneralCommissioning::Commands::CommissioningComplete::Id, COMMAND_FLAG_ACCEPTED, nullptr},
+};
+
+constexpr const command_entry_t generated_command_list[] = {
+    {GeneralCommissioning::Commands::ArmFailSafeResponse::Id, COMMAND_FLAG_GENERATED, NULL},
+    {GeneralCommissioning::Commands::SetRegulatoryConfigResponse::Id, COMMAND_FLAG_GENERATED, NULL},
+    {GeneralCommissioning::Commands::CommissioningCompleteResponse::Id, COMMAND_FLAG_GENERATED, NULL},
+};
+
 command_t *create_arm_fail_safe(cluster_t *cluster)
 {
     return esp_matter::command::create(cluster, GeneralCommissioning::Commands::ArmFailSafe::Id, COMMAND_FLAG_ACCEPTED,
-                                       esp_matter_command_callback_arm_fail_safe);
+                                       nullptr);
 }
 
 command_t *create_set_regulatory_config(cluster_t *cluster)
 {
     return esp_matter::command::create(cluster, GeneralCommissioning::Commands::SetRegulatoryConfig::Id,
-                                       COMMAND_FLAG_ACCEPTED, esp_matter_command_callback_set_regulatory_config);
+                                       COMMAND_FLAG_ACCEPTED, nullptr);
 }
 
 command_t *create_commissioning_complete(cluster_t *cluster)
 {
     return esp_matter::command::create(cluster, GeneralCommissioning::Commands::CommissioningComplete::Id,
-                                       COMMAND_FLAG_ACCEPTED, esp_matter_command_callback_commissioning_complete);
+                                       COMMAND_FLAG_ACCEPTED, nullptr);
 }
 
 command_t *create_arm_fail_safe_response(cluster_t *cluster)
@@ -1519,11 +1877,36 @@ command_t *create_commissioning_complete_response(cluster_t *cluster)
                                        COMMAND_FLAG_GENERATED, NULL);
 }
 
+command_t *create_set_tc_acknowledgements(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, GeneralCommissioning::Commands::SetTCAcknowledgements::Id,
+                                       COMMAND_FLAG_ACCEPTED, nullptr);
+}
+
+command_t *create_set_tc_acknowledgements_response(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, GeneralCommissioning::Commands::SetTCAcknowledgementsResponse::Id,
+                                       COMMAND_FLAG_GENERATED, NULL);
+}
+
 } /* command */
 } /* general_commissioning */
 
 namespace network_commissioning {
 namespace command {
+
+constexpr const command_entry_t accepted_command_list[] = {
+    {NetworkCommissioning::Commands::ScanNetworks::Id, COMMAND_FLAG_ACCEPTED, NULL},
+    {NetworkCommissioning::Commands::RemoveNetwork::Id, COMMAND_FLAG_ACCEPTED, NULL},
+    {NetworkCommissioning::Commands::ConnectNetwork::Id, COMMAND_FLAG_ACCEPTED, NULL},
+    {NetworkCommissioning::Commands::ReorderNetwork::Id, COMMAND_FLAG_ACCEPTED, NULL},
+};
+
+constexpr const command_entry_t generated_command_list[] = {
+    {NetworkCommissioning::Commands::ScanNetworksResponse::Id, COMMAND_FLAG_GENERATED, NULL},
+    {NetworkCommissioning::Commands::NetworkConfigResponse::Id, COMMAND_FLAG_GENERATED, NULL},
+    {NetworkCommissioning::Commands::ConnectNetworkResponse::Id, COMMAND_FLAG_GENERATED, NULL},
+};
 
 command_t *create_scan_networks(cluster_t *cluster)
 {
@@ -1585,6 +1968,15 @@ command_t *create_connect_network_response(cluster_t *cluster)
 namespace administrator_commissioning {
 namespace command {
 
+constexpr const command_entry_t accepted_command_list[] = {
+    {AdministratorCommissioning::Commands::OpenCommissioningWindow::Id, COMMAND_FLAG_ACCEPTED,
+     esp_matter_command_callback_open_commissioning_window},
+    {AdministratorCommissioning::Commands::RevokeCommissioning::Id, COMMAND_FLAG_ACCEPTED,
+     esp_matter_command_callback_revoke_commissioning},
+};
+
+constexpr const command_entry_t generated_command_list[] = {};
+
 command_t *create_open_commissioning_window(cluster_t *cluster)
 {
     return esp_matter::command::create(cluster, AdministratorCommissioning::Commands::OpenCommissioningWindow::Id,
@@ -1609,6 +2001,24 @@ command_t *create_revoke_commissioning(cluster_t *cluster)
 
 namespace operational_credentials {
 namespace command {
+
+constexpr const command_entry_t accepted_command_list[] = {
+    {OperationalCredentials::Commands::AttestationRequest::Id, COMMAND_FLAG_ACCEPTED, esp_matter_command_callback_attestation_request},
+    {OperationalCredentials::Commands::CertificateChainRequest::Id, COMMAND_FLAG_ACCEPTED, esp_matter_command_callback_certificate_chain_request},
+    {OperationalCredentials::Commands::CSRRequest::Id, COMMAND_FLAG_ACCEPTED, esp_matter_command_callback_csr_request},
+    {OperationalCredentials::Commands::AddNOC::Id, COMMAND_FLAG_ACCEPTED, esp_matter_command_callback_add_noc},
+    {OperationalCredentials::Commands::UpdateNOC::Id, COMMAND_FLAG_ACCEPTED, esp_matter_command_callback_update_noc},
+    {OperationalCredentials::Commands::UpdateFabricLabel::Id, COMMAND_FLAG_ACCEPTED, esp_matter_command_callback_update_fabric_label},
+    {OperationalCredentials::Commands::RemoveFabric::Id, COMMAND_FLAG_ACCEPTED, esp_matter_command_callback_remove_fabric},
+    {OperationalCredentials::Commands::AddTrustedRootCertificate::Id, COMMAND_FLAG_ACCEPTED, esp_matter_command_callback_add_trusted_root_certificate},
+};
+
+constexpr const command_entry_t generated_command_list[] = {
+    {OperationalCredentials::Commands::AttestationResponse::Id, COMMAND_FLAG_GENERATED, NULL},
+    {OperationalCredentials::Commands::CertificateChainResponse::Id, COMMAND_FLAG_GENERATED, NULL},
+    {OperationalCredentials::Commands::CSRResponse::Id, COMMAND_FLAG_GENERATED, NULL},
+    {OperationalCredentials::Commands::NOCResponse::Id, COMMAND_FLAG_GENERATED, NULL},
+};
 
 command_t *create_attestation_request(cluster_t *cluster)
 {
@@ -2183,6 +2593,18 @@ command_t *create_get_weekly_schedule_response(cluster_t *cluster)
                                        NULL);
 }
 
+command_t *create_set_active_schedule_request(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, Thermostat::Commands::SetActiveScheduleRequest::Id, COMMAND_FLAG_ACCEPTED,
+                                       esp_matter_command_callback_set_active_schedule_request);
+}
+
+command_t *create_set_active_preset_request(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, Thermostat::Commands::SetActivePresetRequest::Id, COMMAND_FLAG_ACCEPTED,
+                                       esp_matter_command_callback_set_active_preset_request);
+}
+
 } /* command */
 } /* thermostat */
 
@@ -2216,26 +2638,6 @@ command_t *create_operational_command_response(cluster_t *cluster)
 } /* command */
 } /* operational_state */
 
-namespace laundry_washer_mode {
-namespace command {
-command_t *create_change_to_mode(cluster_t *cluster)
-{
-    return esp_matter::command::create(cluster, LaundryWasherMode::Commands::ChangeToMode::Id, COMMAND_FLAG_ACCEPTED, NULL);
-}
-
-} /* command */
-} /* laundry_washer_mode */
-
-namespace dish_washer_mode {
-namespace command {
-command_t *create_change_to_mode(cluster_t *cluster)
-{
-    return esp_matter::command::create(cluster, DishwasherMode::Commands::ChangeToMode::Id, COMMAND_FLAG_ACCEPTED, NULL);
-}
-
-} /* command */
-} /* dish_washer_mode */
-
 namespace smoke_co_alarm {
 namespace command {
 
@@ -2261,6 +2663,156 @@ command_t *create_unlock_door(cluster_t *cluster)
 {
     return esp_matter::command::create(cluster, DoorLock::Commands::UnlockDoor::Id, COMMAND_FLAG_ACCEPTED,
                                        esp_matter_command_callback_unlock_door);
+}
+
+command_t *create_unlock_with_timeout(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, DoorLock::Commands::UnlockWithTimeout::Id, COMMAND_FLAG_ACCEPTED,
+                                       esp_matter_command_callback_unlock_with_timeout);
+}
+
+command_t *create_set_weekday_schedule(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, DoorLock::Commands::SetWeekDaySchedule::Id, COMMAND_FLAG_ACCEPTED,
+                                       esp_matter_command_callback_set_weekday_schedule);
+}
+
+command_t *create_get_weekday_schedule(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, DoorLock::Commands::GetWeekDaySchedule::Id, COMMAND_FLAG_ACCEPTED,
+                                       esp_matter_command_callback_get_weekday_schedule);
+}
+
+command_t *create_get_weekday_schedule_response(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, DoorLock::Commands::GetWeekDayScheduleResponse::Id, COMMAND_FLAG_GENERATED,
+                                       NULL);
+}
+
+command_t *create_clear_weekday_schedule(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, DoorLock::Commands::ClearWeekDaySchedule::Id, COMMAND_FLAG_ACCEPTED,
+                                       esp_matter_command_callback_clear_weekday_schedule);
+}
+
+command_t *create_set_year_day_schedule(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, DoorLock::Commands::SetYearDaySchedule::Id, COMMAND_FLAG_ACCEPTED,
+                                       esp_matter_command_callback_set_year_day_schedule);
+}
+
+command_t *create_get_year_day_schedule(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, DoorLock::Commands::GetYearDaySchedule::Id, COMMAND_FLAG_ACCEPTED,
+                                       esp_matter_command_callback_get_year_day_schedule);
+}
+
+command_t *create_get_year_day_schedule_response(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, DoorLock::Commands::GetYearDayScheduleResponse::Id, COMMAND_FLAG_GENERATED,
+                                       NULL);
+}
+
+command_t *create_clear_year_day_schedule(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, DoorLock::Commands::ClearYearDaySchedule::Id, COMMAND_FLAG_ACCEPTED,
+                                       esp_matter_command_callback_clear_year_day_schedule);
+}
+
+command_t *create_set_holiday_schedule(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, DoorLock::Commands::SetHolidaySchedule::Id, COMMAND_FLAG_ACCEPTED,
+                                       esp_matter_command_callback_set_holiday_schedule);
+}
+
+command_t *create_get_holiday_schedule(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, DoorLock::Commands::GetHolidaySchedule::Id, COMMAND_FLAG_ACCEPTED,
+                                       esp_matter_command_callback_get_holiday_schedule);
+}
+
+command_t *create_get_holiday_schedule_response(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, DoorLock::Commands::GetHolidayScheduleResponse::Id, COMMAND_FLAG_GENERATED,
+                                       NULL);
+}
+
+command_t *create_clear_holiday_schedule(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, DoorLock::Commands::ClearHolidaySchedule::Id, COMMAND_FLAG_ACCEPTED,
+                                       esp_matter_command_callback_clear_holiday_schedule);
+}
+
+command_t *create_set_user(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, DoorLock::Commands::SetUser::Id, COMMAND_FLAG_ACCEPTED,
+                                       esp_matter_command_callback_set_user);
+}
+
+command_t *create_get_user(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, DoorLock::Commands::GetUser::Id, COMMAND_FLAG_ACCEPTED,
+                                       esp_matter_command_callback_get_user);
+}
+
+command_t *create_get_user_response(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, DoorLock::Commands::GetUserResponse::Id, COMMAND_FLAG_GENERATED,
+                                       NULL);
+}
+
+command_t *create_clear_user(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, DoorLock::Commands::ClearUser::Id, COMMAND_FLAG_ACCEPTED,
+                                       esp_matter_command_callback_clear_user);
+}
+
+command_t *create_set_credential(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, DoorLock::Commands::SetCredential::Id, COMMAND_FLAG_ACCEPTED,
+                                       esp_matter_command_callback_set_credential);
+}
+
+command_t *create_set_credential_response(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, DoorLock::Commands::SetCredentialResponse::Id, COMMAND_FLAG_GENERATED,
+                                       NULL);
+}
+
+command_t *create_get_credential_status(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, DoorLock::Commands::GetCredentialStatus::Id, COMMAND_FLAG_ACCEPTED,
+                                       esp_matter_command_callback_get_credential_status);
+}
+
+command_t *create_get_credential_status_response(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, DoorLock::Commands::GetCredentialStatusResponse::Id, COMMAND_FLAG_GENERATED,
+                                       NULL);
+}
+
+command_t *create_clear_credential(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, DoorLock::Commands::ClearCredential::Id, COMMAND_FLAG_ACCEPTED,
+                                       esp_matter_command_callback_clear_credential);
+}
+
+command_t *create_unbolt_door(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, DoorLock::Commands::UnboltDoor::Id, COMMAND_FLAG_ACCEPTED,
+                                       esp_matter_command_callback_unbolt_door);
+}
+
+command_t *create_set_aliro_reader_config(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, DoorLock::Commands::SetAliroReaderConfig::Id, COMMAND_FLAG_ACCEPTED,
+                                       esp_matter_command_callback_set_aliro_reader_config);
+}
+
+command_t *create_clear_aliro_reader_config(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, DoorLock::Commands::ClearAliroReaderConfig::Id, COMMAND_FLAG_ACCEPTED,
+                                       esp_matter_command_callback_clear_aliro_reader_config);
 }
 
 } /* command */
@@ -2316,6 +2868,7 @@ command_t *create_go_to_tilt_percentage(cluster_t *cluster)
 
 namespace mode_select {
 namespace command {
+
 command_t *create_change_to_mode(cluster_t *cluster)
 {
     return esp_matter::command::create(cluster, ModeSelect::Commands::ChangeToMode::Id, COMMAND_FLAG_ACCEPTED, esp_matter_command_callback_change_to_mode);
@@ -2326,6 +2879,7 @@ command_t *create_change_to_mode(cluster_t *cluster)
 
 namespace temperature_control {
 namespace command {
+
 command_t *create_set_temperature(cluster_t *cluster)
 {
     return esp_matter::command::create(cluster, TemperatureControl::Commands::SetTemperature::Id, COMMAND_FLAG_ACCEPTED,
@@ -2366,28 +2920,26 @@ command_t *create_reset_condition(cluster_t *cluster)
 } /* command */
 } /* activated_carbon_filter_monitoring */
 
-namespace rvc_run_mode {
+namespace mode_base {
 namespace command {
+
+// command response is null because of InvokeCommandHandler is overriden in srs/app/clusters/mode-base
 command_t *create_change_to_mode(cluster_t *cluster)
 {
-    return esp_matter::command::create(cluster, RvcRunMode::Commands::ChangeToMode::Id, COMMAND_FLAG_ACCEPTED, esp_matter_command_callback_change_to_mode);
+    return esp_matter::command::create(cluster, ModeBase::Commands::ChangeToMode::Id, COMMAND_FLAG_ACCEPTED, NULL);
+}
+
+command_t *create_change_to_mode_response(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, ModeBase::Commands::ChangeToModeResponse::Id, COMMAND_FLAG_GENERATED, NULL);
 }
 
 } /* command */
-} /* rvc_run_mode */
-
-namespace rvc_clean_mode {
-namespace command {
-command_t *create_change_to_mode(cluster_t *cluster)
-{
-    return esp_matter::command::create(cluster, RvcCleanMode::Commands::ChangeToMode::Id, COMMAND_FLAG_ACCEPTED, esp_matter_command_callback_change_to_mode);
-}
-
-} /* command */
-} /* rvc_clean_mode */
+} /* mode_base */
 
 namespace keypad_input {
 namespace command {
+
 command_t *create_send_key(cluster_t *cluster)
 {
     return esp_matter::command::create(cluster, KeypadInput::Commands::SendKey::Id, COMMAND_FLAG_ACCEPTED, esp_matter_command_callback_send_key);
@@ -2416,7 +2968,409 @@ command_t *create_enable_disable_alarm(cluster_t *cluster)
 } /* command */
 } /* boolean_state_configuration */
 
+namespace energy_evse {
+namespace command {
+
+command_t *create_disable(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, EnergyEvse::Commands::Disable::Id, COMMAND_FLAG_ACCEPTED, NULL);
+}
+
+command_t *create_enable_charging(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, EnergyEvse::Commands::EnableCharging::Id, COMMAND_FLAG_ACCEPTED, NULL);
+}
+
+command_t *create_enable_discharging(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, EnergyEvse::Commands::EnableDischarging::Id, COMMAND_FLAG_ACCEPTED, NULL);
+}
+
+command_t *create_start_diagnostics(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, EnergyEvse::Commands::StartDiagnostics::Id, COMMAND_FLAG_ACCEPTED, NULL);
+}
+
+command_t *create_set_targets(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, EnergyEvse::Commands::SetTargets::Id, COMMAND_FLAG_ACCEPTED, NULL);
+}
+
+command_t *create_get_targets(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, EnergyEvse::Commands::GetTargets::Id, COMMAND_FLAG_ACCEPTED, NULL);
+}
+
+command_t *create_clear_targets(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, EnergyEvse::Commands::ClearTargets::Id, COMMAND_FLAG_ACCEPTED, NULL);
+}
+
+command_t *create_get_targets_response(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, EnergyEvse::Commands::GetTargetsResponse::Id, COMMAND_FLAG_GENERATED, NULL);
+}
+
+} /* command */
+} /* energy_evse */
+
+namespace microwave_oven_control {
+namespace command {
+
+command_t *create_set_cooking_parameters(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, MicrowaveOvenControl::Commands::SetCookingParameters::Id, COMMAND_FLAG_ACCEPTED, NULL);
+}
+
+command_t *create_add_more_time(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, MicrowaveOvenControl::Commands::AddMoreTime::Id, COMMAND_FLAG_ACCEPTED, NULL);
+}
+
+} /* command */
+} /* microwave_oven_control */
+
+namespace valve_configuration_and_control {
+namespace command {
+
+command_t *create_open(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, ValveConfigurationAndControl::Commands::Open::Id, COMMAND_FLAG_ACCEPTED, esp_matter_command_callback_open);
+}
+
+command_t *create_close(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, ValveConfigurationAndControl::Commands::Close::Id, COMMAND_FLAG_ACCEPTED, esp_matter_command_callback_close);
+}
+
+} /* command */
+} /* valve_configuration_and_control */
+
+namespace device_energy_management {
+namespace command {
+command_t *create_power_adjust_request(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, DeviceEnergyManagement::Commands::PowerAdjustRequest::Id, COMMAND_FLAG_ACCEPTED, NULL);
+}
+
+command_t *create_cancel_power_adjust_request(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, DeviceEnergyManagement::Commands::CancelPowerAdjustRequest::Id, COMMAND_FLAG_ACCEPTED, NULL);
+}
+
+command_t *create_start_time_adjust_request(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, DeviceEnergyManagement::Commands::StartTimeAdjustRequest::Id, COMMAND_FLAG_ACCEPTED, NULL);
+}
+
+command_t *create_pause_request(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, DeviceEnergyManagement::Commands::PauseRequest::Id, COMMAND_FLAG_ACCEPTED, NULL);
+}
+
+command_t *create_resume_request(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, DeviceEnergyManagement::Commands::ResumeRequest::Id, COMMAND_FLAG_ACCEPTED, NULL);
+}
+
+command_t *create_modify_forecast_request(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, DeviceEnergyManagement::Commands::ModifyForecastRequest::Id, COMMAND_FLAG_ACCEPTED, NULL);
+}
+
+command_t *create_request_constraint_based_forecast(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, DeviceEnergyManagement::Commands::RequestConstraintBasedForecast::Id, COMMAND_FLAG_ACCEPTED, NULL);
+}
+
+command_t *create_cancel_request(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, DeviceEnergyManagement::Commands::CancelRequest::Id, COMMAND_FLAG_ACCEPTED, NULL);
+}
+
+} /* command */
+} /* device_energy_management */
+
+namespace thread_border_router_management {
+namespace command {
+
+command_t *create_get_active_dataset_request(cluster_t *cluster)
+{
+     return esp_matter::command::create(cluster, ThreadBorderRouterManagement::Commands::GetActiveDatasetRequest::Id,
+                                        COMMAND_FLAG_ACCEPTED, NULL);
+}
+
+command_t *create_get_pending_dataset_request(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, ThreadBorderRouterManagement::Commands::GetPendingDatasetRequest::Id,
+                                       COMMAND_FLAG_ACCEPTED, NULL);
+}
+
+command_t *create_dataset_response(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, ThreadBorderRouterManagement::Commands::DatasetResponse::Id,
+                                       COMMAND_FLAG_GENERATED, NULL);
+}
+
+command_t *create_set_active_dataset_request(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, ThreadBorderRouterManagement::Commands::SetActiveDatasetRequest::Id,
+                                       COMMAND_FLAG_ACCEPTED, NULL);
+}
+
+command_t *create_set_pending_dataset_request(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, ThreadBorderRouterManagement::Commands::SetPendingDatasetRequest::Id,
+                                       COMMAND_FLAG_ACCEPTED, NULL);
+}
+
+} /* command */
+} /* thread_border_router_management */
+
+namespace wifi_network_management {
+namespace command {
+
+command_t *create_network_passphrase_request(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, WiFiNetworkManagement::Commands::NetworkPassphraseRequest::Id,
+                                       COMMAND_FLAG_ACCEPTED, NULL);
+}
+
+command_t *create_network_passphrase_response(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, WiFiNetworkManagement::Commands::NetworkPassphraseResponse::Id,
+                                       COMMAND_FLAG_GENERATED, NULL);
+}
+
+} /* command */
+} /* wifi_network_management */
+
+namespace thread_network_directory {
+namespace command {
+
+command_t *create_add_network(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, ThreadNetworkDirectory::Commands::AddNetwork::Id,
+                                       COMMAND_FLAG_ACCEPTED, NULL);
+}
+
+command_t *create_remove_network(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, ThreadNetworkDirectory::Commands::RemoveNetwork::Id,
+                                       COMMAND_FLAG_ACCEPTED, NULL);
+}
+
+command_t *create_get_operational_dataset(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, ThreadNetworkDirectory::Commands::GetOperationalDataset::Id,
+                                       COMMAND_FLAG_ACCEPTED, NULL);
+}
+
+command_t *create_operational_dataset_response(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, ThreadNetworkDirectory::Commands::OperationalDatasetResponse::Id,
+                                       COMMAND_FLAG_GENERATED, NULL);
+}
+
+} /* command */
+} /* thread_network_directory */
+
+namespace service_area {
+namespace command {
+
+command_t *create_select_areas(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, ServiceArea::Commands::SelectAreas::Id, COMMAND_FLAG_ACCEPTED, NULL);
+}
+
+command_t *create_select_areas_response(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, ServiceArea::Commands::SelectAreasResponse::Id, COMMAND_FLAG_GENERATED, NULL);
+}
+
+command_t *create_skip_area(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, ServiceArea::Commands::SkipAreaResponse::Id, COMMAND_FLAG_ACCEPTED, NULL);
+}
+
+command_t *create_skip_area_response(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, ServiceArea::Commands::SkipAreaResponse::Id, COMMAND_FLAG_GENERATED, NULL);
+}
+
+} /* command */
+} /* service_area */
+
+namespace water_heater_management {
+namespace command {
+
+command_t *create_boost(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, WaterHeaterManagement::Commands::Boost::Id,
+                                       COMMAND_FLAG_ACCEPTED, NULL);
+}
+
+command_t *create_cancel_boost(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, WaterHeaterManagement::Commands::CancelBoost::Id,
+                                       COMMAND_FLAG_ACCEPTED, NULL);
+}
+
+} /* command */
+} /* water_heater_management */
+
+namespace commissioner_control {
+namespace command {
+
+command_t *create_request_commissioning_approval(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, CommissionerControl::Commands::RequestCommissioningApproval::Id,
+                                       COMMAND_FLAG_ACCEPTED, NULL);
+}
+
+command_t *create_commission_node(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, CommissionerControl::Commands::CommissionNode::Id,
+                                       COMMAND_FLAG_ACCEPTED, NULL);
+}
+
+command_t *create_reverse_open_commissioning_window(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, CommissionerControl::Commands::ReverseOpenCommissioningWindow::Id,
+                                       COMMAND_FLAG_ACCEPTED, NULL);
+}
+
+} /* command */
+} /* commissioner_control */
+
+namespace time_synchronization {
+namespace command {
+
+command_t *create_set_utc_time(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, TimeSynchronization::Commands::SetUTCTime::Id, COMMAND_FLAG_ACCEPTED,
+                                       esp_matter_command_callback_set_utc_time);
+}
+
+command_t *create_set_trusted_time_source(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, TimeSynchronization::Commands::SetTrustedTimeSource::Id,
+                                       COMMAND_FLAG_ACCEPTED, esp_matter_command_callback_set_trusted_time_source);
+}
+
+command_t *create_set_time_zone(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, TimeSynchronization::Commands::SetTimeZone::Id, COMMAND_FLAG_ACCEPTED,
+                                       esp_matter_command_callback_set_time_zone);
+}
+
+command_t *create_set_time_zone_response(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, TimeSynchronization::Commands::SetTimeZoneResponse::Id,
+                                       COMMAND_FLAG_GENERATED, nullptr);
+}
+
+command_t *create_set_dst_offset(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, TimeSynchronization::Commands::SetDSTOffset::Id,
+                                       COMMAND_FLAG_ACCEPTED, esp_matter_command_callback_set_dst_offset);
+}
+
+command_t *create_set_default_ntp(cluster_t *cluster)
+{
+    return esp_matter::command::create(cluster, TimeSynchronization::Commands::SetDefaultNTP::Id,
+                                       COMMAND_FLAG_ACCEPTED, esp_matter_command_callback_set_default_ntp);
+}
+
+} /* command */
+} /* time_synchronization */
+
 } /* cluster */
+} /* esp_matter */
+
+namespace esp_matter {
+namespace command {
+#define GET_ACCEPTED_COMMAND_COUNT(cluster) sizeof(cluster::command::accepted_command_list) / sizeof(command_entry_t)
+#define GET_ACCEPTED_COMMAND_LIST(cluster) \
+    static_cast<const command_entry_t *>(&cluster::command::accepted_command_list[0])
+
+#define GET_GENERATED_COMMAND_COUNT(cluster) sizeof(cluster::command::generated_command_list) / sizeof(command_entry_t)
+#define GET_GENERATED_COMMAND_LIST(cluster) \
+    static_cast<const command_entry_t *>(&cluster::command::generated_command_list[0])
+
+#define GET_COMMAND_COUNT_LIST(cluster)                                                                            \
+    GET_ACCEPTED_COMMAND_COUNT(cluster), GET_GENERATED_COMMAND_COUNT(cluster), GET_ACCEPTED_COMMAND_LIST(cluster), \
+        GET_GENERATED_COMMAND_LIST(cluster)
+
+/* Instead of adding the standard commands dynamically, place them in the .rodata section to save RAM. */
+constexpr const cluster_command_t cluster_command_table[] = {
+    {GeneralCommissioning::Id, GET_COMMAND_COUNT_LIST(cluster::general_commissioning)},
+    {NetworkCommissioning::Id, GET_COMMAND_COUNT_LIST(cluster::network_commissioning)},
+    {GeneralDiagnostics::Id, GET_COMMAND_COUNT_LIST(cluster::general_diagnostics)},
+    {AdministratorCommissioning::Id, GET_COMMAND_COUNT_LIST(cluster::administrator_commissioning)},
+    {OperationalCredentials::Id, GET_COMMAND_COUNT_LIST(cluster::operational_credentials)},
+    {GroupKeyManagement::Id, GET_COMMAND_COUNT_LIST(cluster::group_key_management)},
+};
+
+#if defined(CONFIG_ESP_MATTER_ENABLE_MATTER_SERVER) && defined(CONFIG_ESP_MATTER_ENABLE_DATA_MODEL)
+const command_entry_t *get_cluster_accepted_command_list(uint32_t cluster_id)
+{
+    for (auto const &cluster_command : cluster_command_table) {
+        if (cluster_command.cluster_id == cluster_id) {
+            return cluster_command.accepted_command_list;
+        }
+    }
+    return nullptr;
+}
+
+size_t get_cluster_accepted_command_count(uint32_t cluster_id)
+{
+    for (auto const &cluster_command : cluster_command_table) {
+        if (cluster_command.cluster_id == cluster_id) {
+            return cluster_command.accepted_command_count;
+        }
+    }
+    return 0;
+}
+
+const command_entry_t *get_cluster_generated_command_list(uint32_t cluster_id)
+{
+    for (auto const &cluster_command : cluster_command_table) {
+        if (cluster_command.cluster_id == cluster_id) {
+            return cluster_command.generated_command_list;
+        }
+    }
+    return nullptr;
+}
+
+size_t get_cluster_generated_command_count(uint32_t cluster_id)
+{
+    for (auto const &cluster_command : cluster_command_table) {
+        if (cluster_command.cluster_id == cluster_id) {
+            return cluster_command.generated_command_count;
+        }
+    }
+    return 0;
+}
+#endif // defined(CONFIG_ESP_MATTER_ENABLE_MATTER_SERVER) && defined(CONFIG_ESP_MATTER_ENABLE_DATA_MODEL)
+
+static callback_t get_cluster_accepted_command(uint32_t cluster_id, uint32_t command_id)
+{
+#if defined(CONFIG_ESP_MATTER_ENABLE_MATTER_SERVER) && defined(CONFIG_ESP_MATTER_ENABLE_DATA_MODEL)
+    for (auto const &cluster_command : cluster_command_table) {
+        if (cluster_command.cluster_id == cluster_id) {
+            for (size_t index = 0; index < cluster_command.accepted_command_count; ++index){
+                if (cluster_command.accepted_command_list[index].command_id == command_id) {
+                    return cluster_command.accepted_command_list[index].callback;
+                }
+            }
+        }
+    }
+#endif
+    return nullptr;
+}
+
+} /* command */
 } /* esp_matter */
 
 #endif /* FIXED_ENDPOINT_COUNT */

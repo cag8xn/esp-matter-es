@@ -5,19 +5,22 @@
    software is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
    CONDITIONS OF ANY KIND, either express or implied.
 */
+#include <stdio.h>
+#include <string.h>
 
-#include <esp_err.h>
-#include <esp_log.h>
+#include "esp_err.h"
+#include "esp_log.h"
+#include "esp_console.h"
+
 #include <nvs_flash.h>
 
 #include <esp_matter.h>
 #include <esp_matter_console.h>
-#include <esp_matter_ota.h>
 
 #include <common_macros.h>
 #include <app_priv.h>
 #include <app_reset.h>
-#include "esp_console.h"
+
 #include <helpers.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -27,17 +30,21 @@
 #include <app/server/Server.h>
 #if CHIP_DEVICE_CONFIG_ENABLE_THREAD
 #include <platform/ESP32/OpenthreadLauncher.h>
+#include <esp_openthread.h>
+#include <esp_openthread_border_router.h>
+#include <esp_openthread_lock.h>
 #endif
-
 
 static const char *TAG = "app_main";
 
+uint16_t app_endpoint_id = 0;
 // Semaphore is used to block esp_matter::start(), it will be unblock when we have
 // valid device type input from user.
 SemaphoreHandle_t semaphoreHandle = NULL;
 
 using namespace esp_matter;
 using namespace esp_matter::attribute;
+using namespace esp_matter::cluster;
 using namespace esp_matter::endpoint;
 using namespace chip::app::Clusters;
 
@@ -109,6 +116,21 @@ static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
         ESP_LOGI(TAG, "Fabric is committed");
         break;
 
+    case chip::DeviceLayer::DeviceEventType::kESPSystemEvent:
+        if (event->Platform.ESPSystemEvent.Base == IP_EVENT &&
+            event->Platform.ESPSystemEvent.Id == IP_EVENT_STA_GOT_IP) {
+#ifdef CONFIG_OPENTHREAD_BORDER_ROUTER
+            static bool sThreadBRInitialized = false;
+            if (!sThreadBRInitialized) {
+                esp_openthread_set_backbone_netif(esp_netif_get_handle_from_ifkey("WIFI_STA_DEF"));
+                esp_openthread_lock_acquire(portMAX_DELAY);
+                esp_openthread_border_router_init();
+                esp_openthread_lock_release();
+                sThreadBRInitialized = true;
+            }
+#endif
+        }
+        break;
 
     default:
         break;
@@ -130,8 +152,14 @@ static esp_err_t app_identification_cb(identification::callback_type_t type, uin
 static esp_err_t app_attribute_update_cb(attribute::callback_type_t type, uint16_t endpoint_id, uint32_t cluster_id,
                                          uint32_t attribute_id, esp_matter_attr_val_t *val, void *priv_data)
 {
+    esp_err_t err = ESP_OK;
     // If user want to use driver, can be called from here.
-    return ESP_OK;
+    if (type == PRE_UPDATE) {
+        /* Driver update */
+        app_driver_handle_t driver_handle = (app_driver_handle_t)priv_data;
+        err = app_driver_attribute_update(driver_handle, endpoint_id, cluster_id, attribute_id, val);
+    }
+    return err;
 }
 
 extern "C" void app_main()
@@ -146,9 +174,9 @@ extern "C" void app_main()
     // node handle can be used to add/modify other endpoints.
     node_t *node = node::create(&node_config, app_attribute_update_cb, app_identification_cb);
     ABORT_APP_ON_FAILURE(node != nullptr, ESP_LOGE(TAG, "Failed to create Matter node"));
-    
+
     uint8_t device_type_index;
-    if(esp_matter::nvs_helpers::get_device_type_from_nvs(&device_type_index) != ESP_OK) {
+    if (esp_matter::nvs_helpers::get_device_type_from_nvs(&device_type_index) != ESP_OK) {
         semaphoreHandle = xSemaphoreCreateBinary();
         ABORT_APP_ON_FAILURE(semaphoreHandle != nullptr, ESP_LOGE(TAG, "Failed to create semaphore"));
 
@@ -164,6 +192,10 @@ extern "C" void app_main()
         esp_matter::data_model::create(device_type_index);
     }
 
+    /* Initialize app driver, according to the device_type.
+    For now it's just for fan_control driver, Waiting for refinement*/
+    app_driver_init();
+
 #if CHIP_DEVICE_CONFIG_ENABLE_THREAD
     /* Set OpenThread platform config */
     esp_openthread_platform_config_t config = {
@@ -177,10 +209,18 @@ extern "C" void app_main()
     /* Matter start */
      err = esp_matter::start(app_event_cb);
      ABORT_APP_ON_FAILURE(err == ESP_OK, ESP_LOGE(TAG, "Failed to start Matter, err:%d", err));
+     if (err != ESP_OK) {
+         ESP_LOGE(TAG, "Matter start failed: %d", err);
+     }
 
 #if CONFIG_ENABLE_CHIP_SHELL
     esp_matter::console::diagnostics_register_commands();
     esp_matter::console::wifi_register_commands();
+    esp_matter::console::factoryreset_register_commands();
     esp_matter::console::init();
+#ifdef CONFIG_OPENTHREAD_CLI
+    esp_matter::console::otcli_register_commands();
+#endif // CONFIG_OPENTHREAD_BORDER_ROUTER && CONFIG_OPENTHREAD_CLI
+
 #endif
 }

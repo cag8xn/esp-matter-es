@@ -17,11 +17,12 @@
 
 #include <app/clusters/ota-requestor/BDXDownloader.h>
 #include <app/clusters/ota-requestor/DefaultOTARequestor.h>
-#include <app/clusters/ota-requestor/DefaultOTARequestorDriver.h>
+#include <app/clusters/ota-requestor/ExtendedOTARequestorDriver.h>
 #include <app/clusters/ota-requestor/DefaultOTARequestorStorage.h>
 #include <platform/ESP32/OTAImageProcessorImpl.h>
 
 #include <esp_matter.h>
+#include <esp_matter_ota.h>
 #include <zap-generated/endpoint_config.h>
 
 using chip::BDXDownloader;
@@ -29,7 +30,7 @@ using chip::DefaultOTARequestor;
 using chip::DefaultOTARequestorStorage;
 using chip::OTAImageProcessorImpl;
 using chip::Server;
-using chip::DeviceLayer::DefaultOTARequestorDriver;
+using chip::DeviceLayer::ExtendedOTARequestorDriver;
 
 using namespace esp_matter;
 using namespace esp_matter::endpoint;
@@ -38,15 +39,20 @@ using namespace esp_matter::cluster;
 #if CONFIG_ENABLE_OTA_REQUESTOR
 DefaultOTARequestor gRequestorCore;
 DefaultOTARequestorStorage gRequestorStorage;
-DefaultOTARequestorDriver gRequestorUser;
+ExtendedOTARequestorDriver gRequestorUser;
 BDXDownloader gDownloader;
 OTAImageProcessorImpl gImageProcessor;
-#endif
+
+static esp_matter_ota_requestor_impl_t s_ota_requestor_impl = {
+    .driver = &gRequestorUser,
+    .image_processor = &gImageProcessor,
+};
+#endif // CONFIG_ENABLE_OTA_REQUESTOR
 
 esp_err_t esp_matter_ota_requestor_init(void)
 {
 #if (CONFIG_ENABLE_OTA_REQUESTOR && (FIXED_ENDPOINT_COUNT == 0))
-    ota_requestor::config_t config;
+    endpoint::ota_requestor::config_t config;
     node_t *root_node = esp_matter::node::get();
     endpoint_t *root_node_endpoint = esp_matter::endpoint::get(root_node, 0);
 
@@ -54,29 +60,48 @@ esp_err_t esp_matter_ota_requestor_init(void)
         return ESP_FAIL;
     }
 
-    cluster_t *cluster_p = ota_provider::create(root_node_endpoint, NULL, CLUSTER_FLAG_CLIENT);
-    cluster_t *cluster_r = ota_requestor::create(root_node_endpoint, &config, CLUSTER_FLAG_SERVER);
+    return endpoint::ota_requestor::add(root_node_endpoint, &config);
+#else
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
+}
 
-    if (!cluster_p || !cluster_r) {
-        return ESP_FAIL;
+static esp_err_t esp_matter_ota_override_impl(const esp_matter_ota_requestor_impl_t *impl)
+{
+#if CONFIG_ENABLE_OTA_REQUESTOR
+    VerifyOrReturnError(impl != nullptr, ESP_ERR_INVALID_ARG);
+
+    if (impl->driver != nullptr) {
+        s_ota_requestor_impl.driver = impl->driver;
     }
+    if (impl->image_processor != nullptr) {
+        s_ota_requestor_impl.image_processor = impl->image_processor;
+    }
+
+    s_ota_requestor_impl.user_consent = impl->user_consent;
 
     return ESP_OK;
 #else
     return ESP_ERR_NOT_SUPPORTED;
-#endif
+#endif // CONFIG_ENABLE_OTA_REQUESTOR
 }
 
 void esp_matter_ota_requestor_start(void)
 {
 #if CONFIG_ENABLE_OTA_REQUESTOR
     VerifyOrReturn(chip::GetRequestorInstance() == nullptr);
+
     chip::SetRequestorInstance(&gRequestorCore);
     gRequestorStorage.Init(Server::GetInstance().GetPersistentStorage());
-    gRequestorCore.Init(Server::GetInstance(), gRequestorStorage, gRequestorUser, gDownloader);
-    gImageProcessor.SetOTADownloader(&gDownloader);
-    gDownloader.SetImageProcessorDelegate(&gImageProcessor);
-    gRequestorUser.Init(&gRequestorCore, &gImageProcessor);
+
+    gRequestorCore.Init(Server::GetInstance(), gRequestorStorage, *s_ota_requestor_impl.driver, gDownloader);
+
+    s_ota_requestor_impl.image_processor->SetOTADownloader(&gDownloader);
+
+    gDownloader.SetImageProcessorDelegate(s_ota_requestor_impl.image_processor);
+
+    s_ota_requestor_impl.driver->SetUserConsentDelegate(s_ota_requestor_impl.user_consent);
+    s_ota_requestor_impl.driver->Init(&gRequestorCore, s_ota_requestor_impl.image_processor);
 #endif
 }
 
@@ -88,3 +113,23 @@ esp_err_t esp_matter_ota_requestor_encrypted_init(const char *key, uint16_t size
     return ESP_OK;
 }
 #endif // CONFIG_ENABLE_ENCRYPTED_OTA
+
+
+esp_err_t esp_matter_ota_requestor_set_config(const esp_matter_ota_config_t & config)
+{
+#if CONFIG_ENABLE_OTA_REQUESTOR
+    if (config.periodic_query_timeout) {
+        gRequestorUser.SetPeriodicQueryTimeout(config.periodic_query_timeout);
+    }
+    if (config.watchdog_timeout) {
+        gRequestorUser.SetWatchdogTimeout(config.watchdog_timeout);
+    }
+    if (config.impl != nullptr) {
+        esp_matter_ota_override_impl(config.impl);
+    }
+
+    return ESP_OK;
+#else
+    return ESP_ERR_NOT_SUPPORTED;
+#endif // CONFIG_ENABLE_OTA_REQUESTOR
+}

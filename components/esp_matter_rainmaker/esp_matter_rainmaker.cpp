@@ -22,6 +22,7 @@
 #include <esp_rmaker_user_mapping.h>
 #include <app/util/attribute-storage.h>
 #include <app/AttributeAccessInterface.h>
+#include <app/AttributeAccessInterfaceRegistry.h>
 
 #define ESP_MATTER_RAINMAKER_COMMAND_LIMIT              5 /* This command can be called 5 times per reboot */
 #define ESP_MATTER_RAINMAKER_MAX_DATA_LEN               40
@@ -362,8 +363,7 @@ static esp_err_t sign_data_command_callback(const ConcreteCommandPath &command_p
 static esp_err_t custom_cluster_create()
 {
     /* Get the endpoint */
-    node_t *node = node::get();
-    endpoint_t *endpoint = endpoint::get(node, cluster::rainmaker::endpoint_id);
+    endpoint_t *endpoint = endpoint::get(cluster::rainmaker::endpoint_id);
 
     /* Create custom rainmaker cluster */
     cluster_t *cluster = esp_matter::cluster::create(endpoint, cluster::rainmaker::Id, CLUSTER_FLAG_SERVER);
@@ -449,7 +449,7 @@ esp_err_t init()
         return err;
     }
 
-    registerAttributeAccessOverride(&gAttrAccess);
+    AttributeAccessInterfaceRegistry::Instance().Register(&gAttrAccess);
     return ESP_OK;
 
 }

@@ -20,6 +20,9 @@
 #include <app/util/af-types.h>
 #include <esp_err.h>
 #include <esp_matter_attribute_utils.h>
+#include <app/AttributePathParams.h>
+#include <app/CommandPathParams.h>
+#include <app/EventPathParams.h>
 
 using chip::app::ConcreteCommandPath;
 using chip::DeviceLayer::ChipDeviceEvent;
@@ -182,6 +185,17 @@ esp_err_t destroy(node_t *node, endpoint_t *endpoint);
  */
 endpoint_t *get(node_t *node, uint16_t endpoint_id);
 
+/** Get endpoint
+ *
+ * Get the endpoint present on the node.
+ *
+ * @param[in] endpoint_id Endpoint ID of the endpoint.
+ *
+ * @return Endpoint handle on success.
+ * @return NULL in case of failure.
+ */
+endpoint_t *get(uint16_t endpoint_id);
+
 /** Get first endpoint
  *
  * Get the first endpoint present on the node.
@@ -287,6 +301,31 @@ esp_err_t set_parent_endpoint(endpoint_t *endpoint, endpoint_t *parent_endpoint)
  */
 void *get_priv_data(uint16_t endpoint_id);
 
+/** Set private data
+ *
+ * Set the private data after creating the endpoint.
+ *
+ * @param[in] endpoint_id Endpoint ID of the endpoint.
+ * @param[in] priv_data Private data of the endpoint.
+ *
+ * @return ESP_OK on success.
+ * @return ESP_ERR_INVALID_STATE or ESP_ERR_NOT_FOUND in case of failure.
+ */
+esp_err_t set_priv_data(uint16_t endpoint_id, void *priv_data);
+
+/** Set identify
+ *
+ * Set identify to the endpoint. The identify pointer should be dynamically allocated using 'chip::Platform::New<Identify>()',
+ * and once Matter stack is done using it, it will be freed by 'chip::Platform::Delete()'.
+ *
+ * @param[in] endpoint_id Endpoint id.
+ * @param[in] identify Identify pointer.
+ *
+ * @return ESP_OK on success.
+ * @return error in case of failure.
+ */
+esp_err_t set_identify(uint16_t endpoint_id, void *identify);
+
 /** Enable endpoint
  *
  * Enable the endpoint which has been previously created.
@@ -311,6 +350,18 @@ namespace cluster {
  * `Matter<cluster_name>PluginServerInitCallback` API, if it exists.
  */
 typedef void (*plugin_server_init_callback_t)();
+
+/** Cluster delegate server init callback
+ *
+ * This callback will be called when the endpoints are initialised.
+ */
+typedef void (*delegate_init_callback_t)(void *ptr, uint16_t endpoint_id);
+
+/** Cluster add bounds callback
+ *
+ * This callback will be called when the endpoints are initialised.
+ */
+typedef void (*add_bounds_callback_t)(cluster_t *cluster);
 
 /** Generic function
  *
@@ -342,6 +393,18 @@ cluster_t *create(endpoint_t *endpoint, uint32_t cluster_id, uint8_t flags);
  * @return NULL in case of failure.
  */
 cluster_t *get(endpoint_t *endpoint, uint32_t cluster_id);
+
+/** Get cluster
+ *
+ * Get the cluster present on the endpoint.
+ *
+ * @param[in] endpoint_id Endpoint id.
+ * @param[in] cluster_id Cluster ID for the cluster.
+ *
+ * @return Cluster handle on success.
+ * @return NULL in case of failure.
+ */
+cluster_t *get(uint16_t endpoint_id, uint32_t cluster_id);
 
 /** Get first cluster
  *
@@ -376,6 +439,17 @@ cluster_t *get_next(cluster_t *cluster);
  */
 uint32_t get_id(cluster_t *cluster);
 
+/** Get delegate pointer
+ *
+ * Get the delegate pointer for the cluster.
+ *
+ * @param[in] cluster Cluster handle.
+ *
+ * @return pointer of delegate class on success.
+ * @return nullptr in case of failure.
+ */
+void *get_delegate_impl(cluster_t *cluster);
+
 /** Set cluster plugin server init callback
  *
  * Set the cluster plugin server init callback. This callback will be called when the endpoints are initialised. The
@@ -390,6 +464,27 @@ uint32_t get_id(cluster_t *cluster);
  */
 esp_err_t set_plugin_server_init_callback(cluster_t *cluster, plugin_server_init_callback_t callback);
 
+/** Set server cluster delegate init callback
+ *
+ * @param[in] cluster Cluster handle.
+ * @param[in] callback Delegate server init callback.
+ * @param[in] delegate Pointer to delegate impl..
+ *
+ * @return ESP_OK on success.
+ * @return error in case of failure.
+ */
+esp_err_t set_delegate_and_init_callback(cluster_t *cluster, delegate_init_callback_t callback, void *delegate);
+
+/** Set server cluster add bounds callback
+ *
+ * @param[in] cluster Cluster handle.
+ * @param[in] callback Add bounds callback.
+ *
+ * @return ESP_OK on success.
+ * @return error in case of failure.
+ */
+esp_err_t set_add_bounds_callback(cluster_t *cluster, add_bounds_callback_t callback);
+
 /** Get cluster plugin server init callback
  *
  * Get the cluster plugin server init callback which has previously been set.
@@ -400,6 +495,24 @@ esp_err_t set_plugin_server_init_callback(cluster_t *cluster, plugin_server_init
  * @return NULL in case of failure or if it has not been set.
  */
 plugin_server_init_callback_t get_plugin_server_init_callback(cluster_t *cluster);
+
+/** Get server cluster delegate init callback
+ *
+ * @param[in] cluster Cluster handle.
+ *
+ * @return Delegate init callback.
+ * @return NULL in case of failure or if it has not been set.
+ */
+delegate_init_callback_t get_delegate_init_callback(cluster_t *cluster);
+
+/** Get server cluster add bounds callback
+ *
+ * @param[in] cluster Cluster handle.
+ *
+ * @return add bounds callback.
+ * @return NULL in case of failure or if it has not been set.
+ */
+add_bounds_callback_t get_add_bounds_callback(cluster_t *cluster);
 
 /** Add cluster function list
  *
@@ -436,7 +549,7 @@ namespace attribute {
  * @return Attribute handle on success.
  * @return NULL in case of failure.
  */
-attribute_t *create(cluster_t *cluster, uint32_t attribute_id, uint8_t flags, esp_matter_attr_val_t val,
+attribute_t *create(cluster_t *cluster, uint32_t attribute_id, uint16_t flags, esp_matter_attr_val_t val,
                     uint16_t max_val_size = 0);
 
 /** Get attribute
@@ -450,6 +563,20 @@ attribute_t *create(cluster_t *cluster, uint32_t attribute_id, uint8_t flags, es
  * @return NULL in case of failure.
  */
 attribute_t *get(cluster_t *cluster, uint32_t attribute_id);
+
+/** Get attribute
+ *
+ * Get the attribute present on the cluster.
+ *
+ * @param[in] endpoint_id Endpoint id..
+ * @param[in] cluster_id Cluster ID for the Cluster.
+ * @param[in] attribute_id Attribute ID for the attribute.
+ *
+ * @return Attribute handle on success.
+ * @return NULL in case of failure.
+ */
+attribute_t *get(uint16_t endpoint_id, uint32_t cluster_id, uint32_t attribute_id);
+
 
 /** Get first attribute
  *
@@ -486,7 +613,7 @@ uint32_t get_id(attribute_t *attribute);
 
 /** Set attribute val
  *
- * Set/Update the value of the attribute in the database.
+ * Set/Update the value of the attribute (has `ATTRIBUTE_FLAG_EXTERNAL_STORAGE` flag) in the database.
  *
  * @note: Once `esp_matter::start()` is done, `attribute::update()` should be used to update the attribute value.
  *
@@ -500,7 +627,7 @@ esp_err_t set_val(attribute_t *attribute, esp_matter_attr_val_t *val);
 
 /** Get attribute val
  *
- * Get the value of the attribute from the database.
+ * Get the value of the attribute (has `ATTRIBUTE_FLAG_EXTERNAL_STORAGE` flag) from the database.
  *
  * @param[in] attribute Attribute handle.
  * @param[out] val Pointer to `esp_matter_attr_val_t`. Use appropriate elements as per the value type.
@@ -528,7 +655,7 @@ esp_err_t get_val_raw(uint16_t endpoint_id, uint32_t cluster_id, uint32_t attrib
 
 /** Add attribute bounds
  *
- * Add bounds to the attribute. Bounds cannot be added to string/array type attributes.
+ * Add bounds to the attribute (has `ATTRIBUTE_FLAG_EXTERNAL_STORAGE` flag). Bounds cannot be added to string/array type attributes.
  *
  * @param[in] attribute Attribute handle.
  * @param[in] min Minimum allowed value.
@@ -541,14 +668,15 @@ esp_err_t add_bounds(attribute_t *attribute, esp_matter_attr_val_t min, esp_matt
 
 /** Get attribute bounds
  *
- * Get the bounds which have been added to the attribute.
+ * Get the bounds which have been added to the attribute (has `ATTRIBUTE_FLAG_EXTERNAL_STORAGE` flag).
  *
  * @param[in] attribute Attribute handle.
+ * @param[in] bounds Pointer to `esp_matter_attr_bounds_t`.
  *
- * @return Pointer to the attribute bounds structure.
- * @return NULL in case of failure or if the bounds were not added.
+ * @return ESP_OK on success.
+ * @return error in case of failure.
  */
-esp_matter_attr_bounds_t *get_bounds(attribute_t *attribute);
+esp_err_t get_bounds(attribute_t *attribute, esp_matter_attr_bounds_t *bounds);
 
 /** Get attribute flags
  *
@@ -562,7 +690,7 @@ uint16_t get_flags(attribute_t *attribute);
 
 /** Set attribute override
  *
- * Set the override callback for the attribute. For attribute read and write calls, instead of doing that from the
+ * Set the override callback for the attribute (has `ATTRIBUTE_FLAG_EXTERNAL_STORAGE` flag). For attribute read and write calls, instead of doing that from the
  * common database, this callback will be called.
  *
  * This can be used if the application or some component wants to maintain the attribute's value in the application or
@@ -579,7 +707,7 @@ esp_err_t set_override_callback(attribute_t *attribute, callback_t callback);
 
 /** Get attribute override
  *
- * Get the override callback for the attribute.
+ * Get the override callback for the attribute (has `ATTRIBUTE_FLAG_EXTERNAL_STORAGE` flag).
  *
  * @param[in] attribute Attribute handle.
  *
@@ -587,7 +715,7 @@ esp_err_t set_override_callback(attribute_t *attribute, callback_t callback);
  */
 callback_t get_override_callback(attribute_t *attribute);
 
-/** Set attribute deferred persistence
+/** Set attribute (has `ATTRIBUTE_FLAG_EXTERNAL_STORAGE` flag) deferred persistence
  *
  * Only non-volatile attributes can be set with deferred presistence. If an attribute is configured with deferred
  * presistence, any modifications to it will be enacted in its persistent storage with a specific delay
@@ -795,23 +923,44 @@ uint32_t get_id(event_t *event);
 /* Client APIs */
 namespace client {
 
-/** Command handle as the input when calling `connect()` or `cluster_update()`
+/** Client request types
+ */
+typedef enum {
+    INVOKE_CMD = 0,
+    READ_ATTR = 1,
+    READ_EVENT = 2,
+    WRITE_ATTR = 3,
+    SUBSCRIBE_ATTR = 4,
+    SUBSCRIBE_EVENT = 5,
+} request_type_t;
+
+/** Request handle as the input when calling `connect()` or `cluster_update()`
  *
  */
 
-typedef struct command_handle {
+typedef struct request_handle {
+    request_type_t type;
     union {
-        uint16_t endpoint_id;
-        uint16_t group_id;
+        chip::app::AttributePathParams attribute_path;
+        chip::app::EventPathParams event_path;
+        chip::app::CommandPathParams command_path;
     };
-    uint32_t cluster_id;
-    uint32_t command_id;
-    void *command_data;
-    command_handle() : endpoint_id(chip::kInvalidEndpointId), cluster_id(chip::kInvalidClusterId),
-                  command_id(chip::kInvalidCommandId), command_data(NULL){}
-    command_handle(struct command_handle* cmd) : endpoint_id(cmd->endpoint_id), cluster_id(cmd->cluster_id),
-                  command_id(cmd->command_id), command_data(cmd->command_data) {}
-} command_handle_t;
+    /* This could be the command data field when the request type is INVOKE_CMD,
+     * or the attribute value data when the request type is WRITE_ATTR.
+     */
+    void *request_data;
+    request_handle() : type(INVOKE_CMD), request_data(NULL) {}
+    request_handle(struct request_handle* req) : type(req->type), request_data(req->request_data)
+    {
+        if (req->type == INVOKE_CMD) {
+            command_path = req->command_path;
+        } else if (req->type == WRITE_ATTR || req->type == READ_ATTR || req->type == SUBSCRIBE_ATTR) {
+            attribute_path = req->attribute_path;
+        } else if (req->type == READ_EVENT || req->type == SUBSCRIBE_EVENT) {
+            event_path = req->event_path;
+        }
+    }
+} request_handle_t;
 
 /** Peer device handle */
 typedef chip::DeviceProxy peer_device_t;
@@ -819,28 +968,30 @@ typedef chip::DeviceProxy peer_device_t;
 /** CASE Session Manager */
 typedef chip::CASESessionManager case_session_mgr_t;
 
-/** Command send callback
+/** Request send callback
  *
  * This callback will be called when `connect()` or `cluster_update()` is called and the connection completes. The
- * send_command APIs can then be called from the callback.
+ * send_request APIs can then be called from the callback.
  *
  * @param[in] peer_device Peer device handle. This can be passed to the send_command APIs.
- * @param[in] cmd_handle Command handle used by `connect()` or `cluster_update()`.
+ * @param[in] req_handle Request handle used by `connect()` or `cluster_update()`.
  * @param[in] priv_data (Optional) Private data associated with the callback. This will be passed to callback. It
  * should stay allocated throughout the lifetime of the device.
  */
-typedef void (*command_callback_t)(peer_device_t *peer_device, command_handle_t *cmd_handle, void *priv_data);
+typedef void (*request_callback_t)(peer_device_t *peer_device, request_handle_t *req_handle, void *priv_data);
 
-/** Group command send callback
+/** Group request send callback
  *
- * This callback will be called when `cluster_update()` is called and the group command is triggered for binding cluster.
+ * This callback will be called when `cluster_update()` is called and the group request is triggered for binding cluster.
+ *
+ * @note: The request type should be INVOKE_CMD and the command should not expect a response.
  *
  * @param[in] fabric_index The index of the fabric that the group command is sent to.
- * @param[in] cmd_handle  Command handle used by `cluster_update()`.
+ * @param[in] req_handle Request handle used by `cluster_update()`.
  * @param[in] priv_data (Optional) Private data associated with the callback. This will be passed to callback. It
  * should stay allocated throughout the lifetime of the device.
  */
-typedef void (*group_command_callback_t)(uint8_t fabric_index, command_handle_t *cmd_handle, void *priv_data);
+typedef void (*group_request_callback_t)(uint8_t fabric_index, request_handle_t *req_handle, void *priv_data);
 
 /** Initialize binding
  *
@@ -858,59 +1009,59 @@ void binding_manager_init();
 
 /** Connect
  *
- * Connect to another device on the same fabric to send a command.
+ * Connect to another device on the same fabric to send a request.
  *
  * @param[in] case_session_mgr CASE Session Manager to find or establish the session
  * @param[in] fabric_index Fabric index.
  * @param[in] node_id Node ID of the other device.
- * @param[in] cmd_handle Command to be sent to the remote device.
+ * @param[in] req_handle Request to be sent to the remote device.
  *
  * @return ESP_OK on success.
  * @return error in case of failure.
  */
 esp_err_t connect(case_session_mgr_t *case_session_mgr, uint8_t fabric_index, uint64_t node_id,
-                  command_handle_t *cmd_handle);
+                  request_handle_t *req_handle);
 
-/** group_command_send
+/** group_request_send
  *
- * on the same fabric to send a group command.
+ * on the same fabric to send a group request.
  *
  * @param[in] fabric_index Fabric index.
- * @param[in] cmd_handle Command to be sent to the group.
+ * @param[in] req_handle Request to be sent to the group.
  *
  * @return ESP_OK on success.
  * @return error in case of failure.
  */
-esp_err_t group_command_send(uint8_t fabric_index, command_handle_t *cmd_handle);
+esp_err_t group_request_send(uint8_t fabric_index, request_handle_t *req_handle);
 
-/** Set command send callback
+/** Set request send callback
  *
- * Set the common command send callback and the group command send callback. The common callback will be called
+ * Set the common request send callback and the group request send callback. The common callback will be called
  * when `connect()` or `cluster_update()` is called and the connection completes. The group callback will be called
- * when `cluster_update()` is called and the group command is triggered.
+ * when `cluster_update()` is called and the group request is triggered.
  *
- * @param[in] callback command send callback.
- * @param[in] g_callback group command send callback
+ * @param[in] callback request send callback.
+ * @param[in] g_callback group request send callback
  * @param[in] priv_data (Optional) Private data associated with the callback. This will be passed to callback. It
  * should stay allocated throughout the lifetime of the device.
  *
  * @return ESP_OK on success.
  * @return error in case of failure.
  */
-esp_err_t set_command_callback(command_callback_t callback, group_command_callback_t g_callback, void *priv_data);
+esp_err_t set_request_callback(request_callback_t callback, group_request_callback_t g_callback, void *priv_data);
 
 /** Cluster update
  *
- * For an already binded device, this API can be used to get the command send callback, and the send_command APIs can
+ * For an already binded device, this API can be used to get the request send callback, and the send_request APIs can
  * then be called from the callback.
  *
  * @param[in] local_endpoint_id The ID of the local endpoint with a binding cluster.
- * @param[in] cmd_handle Command information to notify the bound cluster changed.
+ * @param[in] req_handle Request information to notify the bound cluster changed.
  *
  * @return ESP_OK on success.
  * @return error in case of failure.
  */
-esp_err_t cluster_update(uint16_t local_endpoint_id, command_handle_t *cmd_handle);
+esp_err_t cluster_update(uint16_t local_endpoint_id, request_handle_t *req_handle);
 
 } /* client */
 } /* esp_matter */

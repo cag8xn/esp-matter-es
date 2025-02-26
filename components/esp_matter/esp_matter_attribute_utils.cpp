@@ -21,6 +21,7 @@
 #include <string.h>
 
 #include <app/util/attribute-storage.h>
+#include <app/util/attribute-table.h>
 #include <app/reporting/reporting.h>
 #include <protocols/interaction_model/Constants.h>
 
@@ -524,10 +525,7 @@ static esp_matter::console::engine attribute_console;
 
 static esp_err_t console_set_handler(int argc, char **argv)
 {
-    if (argc < 4) {
-        ESP_LOGE(TAG, "The arguments for this command is invalid");
-        return ESP_ERR_INVALID_ARG;
-    }
+    VerifyOrReturnError(argc >= 4, ESP_ERR_INVALID_ARG, ESP_LOGE(TAG, "The arguments for this command is invalid"));
 
     uint16_t endpoint_id = strtoul((const char *)&argv[0][2], NULL, 16);
     uint32_t cluster_id = strtoul((const char *)&argv[1][2], NULL, 16);
@@ -536,10 +534,7 @@ static esp_err_t console_set_handler(int argc, char **argv)
     /* Get type from matter_attribute */
     const EmberAfAttributeMetadata *matter_attribute = emberAfLocateAttributeMetadata(endpoint_id, cluster_id,
                                                                     attribute_id);
-    if (!matter_attribute) {
-        ESP_LOGE(TAG, "Matter attribute not found");
-        return ESP_ERR_INVALID_ARG;
-    }
+    VerifyOrReturnError(matter_attribute, ESP_ERR_INVALID_ARG, ESP_LOGE(TAG, "Matter attribute not found"));
 
     /* Use the type to create the val and then update te attribute */
     esp_matter_val_type_t type = get_val_type_from_attribute_type(matter_attribute->attributeType);
@@ -730,10 +725,7 @@ static esp_err_t console_set_handler(int argc, char **argv)
 
 static esp_err_t console_get_handler(int argc, char **argv)
 {
-    if (argc < 3) {
-        ESP_LOGE(TAG, "The arguments for this command is invalid");
-        return ESP_ERR_INVALID_ARG;
-    }
+    VerifyOrReturnError(argc >= 3, ESP_ERR_INVALID_ARG, ESP_LOGE(TAG, "The arguments for this command is invalid"));
     uint16_t endpoint_id = strtoul((const char *)&argv[0][2], NULL, 16);
     uint32_t cluster_id = strtoul((const char *)&argv[1][2], NULL, 16);
     uint32_t attribute_id = strtoul((const char *)&argv[2][2], NULL, 16);
@@ -741,10 +733,7 @@ static esp_err_t console_get_handler(int argc, char **argv)
     /* Get type from matter_attribute */
     const EmberAfAttributeMetadata *matter_attribute = emberAfLocateAttributeMetadata(endpoint_id, cluster_id,
                                                                     attribute_id);
-    if (!matter_attribute) {
-        ESP_LOGE(TAG, "Matter attribute not found");
-        return ESP_ERR_INVALID_ARG;
-    }
+    VerifyOrReturnError(matter_attribute, ESP_ERR_INVALID_ARG, ESP_LOGE(TAG, "Matter attribute not found"));
 
     /* Use the type to read the raw value and then print */
     esp_matter_val_type_t type = get_val_type_from_attribute_type(matter_attribute->attributeType);
@@ -972,19 +961,14 @@ static esp_err_t console_get_handler(int argc, char **argv)
 
 static esp_err_t console_dispatch(int argc, char **argv)
 {
-    if (argc <= 0) {
-        attribute_console.for_each_command(esp_matter::console::print_description, NULL);
-        return ESP_OK;
-    }
+    VerifyOrReturnError(argc > 0, ESP_OK, attribute_console.for_each_command(esp_matter::console::print_description, NULL));
     return attribute_console.exec_command(argc, argv);
 }
 
 static void register_console_commands()
 {
     static bool init_done = false;
-    if (init_done) {
-        return;
-    }
+    VerifyOrReturn(!init_done);
     static const esp_matter::console::command_t command = {
         .name = "attribute",
         .description = "This can be used to simulate on-device control. ",
@@ -1074,6 +1058,11 @@ static esp_matter_val_type_t get_val_type_from_attribute_type(int attribute_type
         break;
 
     case ZCL_OCTET_STRING_ATTRIBUTE_TYPE:
+    case ZCL_IPADR_ATTRIBUTE_TYPE:
+    case ZCL_IPV4ADR_ATTRIBUTE_TYPE:
+    case ZCL_IPV6ADR_ATTRIBUTE_TYPE:
+    case ZCL_IPV6PRE_ATTRIBUTE_TYPE:
+    case ZCL_HWADR_ATTRIBUTE_TYPE:
         return ESP_MATTER_VAL_TYPE_OCTET_STRING;
         break;
 
@@ -1086,34 +1075,75 @@ static esp_matter_val_type_t get_val_type_from_attribute_type(int attribute_type
         break;
 
     case ZCL_INT8U_ATTRIBUTE_TYPE:
+    case ZCL_ACTION_ID_ATTRIBUTE_TYPE:
+    case ZCL_TAG_ATTRIBUTE_TYPE:
+    case ZCL_NAMESPACE_ATTRIBUTE_TYPE:
+    case ZCL_FABRIC_IDX_ATTRIBUTE_TYPE:
+    case ZCL_PERCENT_ATTRIBUTE_TYPE:
         return ESP_MATTER_VAL_TYPE_UINT8;
         break;
 
     case ZCL_INT16S_ATTRIBUTE_TYPE:
+    case ZCL_TEMPERATURE_ATTRIBUTE_TYPE:
         return ESP_MATTER_VAL_TYPE_INT16;
         break;
 
     case ZCL_INT16U_ATTRIBUTE_TYPE:
+    case ZCL_ENTRY_IDX_ATTRIBUTE_TYPE:
+    case ZCL_GROUP_ID_ATTRIBUTE_TYPE:
+    case ZCL_ENDPOINT_NO_ATTRIBUTE_TYPE:
+    case ZCL_VENDOR_ID_ATTRIBUTE_TYPE:
+    case ZCL_PERCENT100THS_ATTRIBUTE_TYPE:
         return ESP_MATTER_VAL_TYPE_UINT16;
         break;
 
     case ZCL_INT32S_ATTRIBUTE_TYPE:
+    case ZCL_INT24S_ATTRIBUTE_TYPE:
         return ESP_MATTER_VAL_TYPE_INT32;
         break;
 
     case ZCL_INT32U_ATTRIBUTE_TYPE:
+    case ZCL_TRANS_ID_ATTRIBUTE_TYPE:
+    case ZCL_CLUSTER_ID_ATTRIBUTE_TYPE:
+    case ZCL_ATTRIB_ID_ATTRIBUTE_TYPE:
+    case ZCL_FIELD_ID_ATTRIBUTE_TYPE:
+    case ZCL_EVENT_ID_ATTRIBUTE_TYPE:
+    case ZCL_COMMAND_ID_ATTRIBUTE_TYPE:
+    case ZCL_EPOCH_S_ATTRIBUTE_TYPE:
+    case ZCL_ELAPSED_S_ATTRIBUTE_TYPE:
+    case ZCL_DATA_VER_ATTRIBUTE_TYPE:
+    case ZCL_DEVTYPE_ID_ATTRIBUTE_TYPE:
+    case ZCL_INT24U_ATTRIBUTE_TYPE:
         return ESP_MATTER_VAL_TYPE_UINT32;
         break;
 
     case ZCL_INT64S_ATTRIBUTE_TYPE:
+    case ZCL_ENERGY_MWH_ATTRIBUTE_TYPE:
+    case ZCL_AMPERAGE_MA_ATTRIBUTE_TYPE:
+    case ZCL_POWER_MW_ATTRIBUTE_TYPE:
+    case ZCL_INT56S_ATTRIBUTE_TYPE:
+    case ZCL_INT48S_ATTRIBUTE_TYPE:
+    case ZCL_INT40S_ATTRIBUTE_TYPE:
         return ESP_MATTER_VAL_TYPE_INT64;
         break;
 
     case ZCL_INT64U_ATTRIBUTE_TYPE:
+    case ZCL_FABRIC_ID_ATTRIBUTE_TYPE:
+    case ZCL_NODE_ID_ATTRIBUTE_TYPE:
+    case ZCL_POSIX_MS_ATTRIBUTE_TYPE:
+    case ZCL_EPOCH_US_ATTRIBUTE_TYPE:
+    case ZCL_SYSTIME_US_ATTRIBUTE_TYPE:
+    case ZCL_SYSTIME_MS_ATTRIBUTE_TYPE:
+    case ZCL_EVENT_NO_ATTRIBUTE_TYPE:
+    case ZCL_INT56U_ATTRIBUTE_TYPE:
+    case ZCL_INT48U_ATTRIBUTE_TYPE:
+    case ZCL_INT40U_ATTRIBUTE_TYPE:
         return ESP_MATTER_VAL_TYPE_UINT64;
         break;
 
     case ZCL_ENUM8_ATTRIBUTE_TYPE:
+    case ZCL_STATUS_ATTRIBUTE_TYPE:
+    case ZCL_PRIORITY_ATTRIBUTE_TYPE:
         return ESP_MATTER_VAL_TYPE_ENUM8;
         break;
 
@@ -1271,7 +1301,10 @@ esp_err_t get_data_from_attr_val(esp_matter_attr_val_t *val, EmberAfAttributeTyp
             if (attribute_type) {
                 *attribute_type = ZCL_CHAR_STRING_ATTRIBUTE_TYPE;
             }
-            size_t string_len = strnlen((const char *)val->val.a.b, val->val.a.s);
+            size_t string_len = 0;
+            if (val->val.a.b) {
+                string_len = strnlen((const char *)val->val.a.b, val->val.a.s);
+            }
             size_t data_size_len = val->val.a.t - val->val.a.s;
             if (string_len >= UINT8_MAX || data_size_len != 1) {
                 return ESP_ERR_INVALID_ARG;
@@ -1298,7 +1331,10 @@ esp_err_t get_data_from_attr_val(esp_matter_attr_val_t *val, EmberAfAttributeTyp
             if (attribute_type) {
                 *attribute_type = ZCL_LONG_CHAR_STRING_ATTRIBUTE_TYPE;
             }
-            size_t string_len = strnlen((const char *)val->val.a.b, val->val.a.s);
+            size_t string_len = 0;
+            if (val->val.a.b) {
+                string_len = strnlen((const char *)val->val.a.b, val->val.a.s);
+            }
             size_t data_size_len = val->val.a.t - val->val.a.s;
             if (string_len >= UINT8_MAX || data_size_len != 2) {
                 return ESP_ERR_INVALID_ARG;
@@ -1602,7 +1638,7 @@ esp_err_t get_data_from_attr_val(esp_matter_attr_val_t *val, EmberAfAttributeTyp
     return ESP_OK;
 }
 
-static esp_err_t get_attr_val_from_data(esp_matter_attr_val_t *val, EmberAfAttributeType attribute_type,
+esp_err_t get_attr_val_from_data(esp_matter_attr_val_t *val, EmberAfAttributeType attribute_type,
                                         uint16_t attribute_size, uint8_t *value,
                                         const EmberAfAttributeMetadata * attribute_metadata)
 {
@@ -1642,7 +1678,12 @@ static esp_err_t get_attr_val_from_data(esp_matter_attr_val_t *val, EmberAfAttri
         break;
     }
 
-    case ZCL_OCTET_STRING_ATTRIBUTE_TYPE: {
+    case ZCL_OCTET_STRING_ATTRIBUTE_TYPE:
+    case ZCL_IPADR_ATTRIBUTE_TYPE:
+    case ZCL_IPV4ADR_ATTRIBUTE_TYPE:
+    case ZCL_IPV6ADR_ATTRIBUTE_TYPE:
+    case ZCL_IPV6PRE_ATTRIBUTE_TYPE:
+    case ZCL_HWADR_ATTRIBUTE_TYPE: {
         *val = esp_matter_octet_str(NULL, 0);
         int data_size_len = val->val.a.t - val->val.a.s;
         int data_count = 0;
@@ -1677,6 +1718,10 @@ static esp_err_t get_attr_val_from_data(esp_matter_attr_val_t *val, EmberAfAttri
     }
 
     case ZCL_INT8U_ATTRIBUTE_TYPE:
+    case ZCL_ACTION_ID_ATTRIBUTE_TYPE:
+    case ZCL_TAG_ATTRIBUTE_TYPE:
+    case ZCL_NAMESPACE_ATTRIBUTE_TYPE:
+    case ZCL_FABRIC_IDX_ATTRIBUTE_TYPE:
     case ZCL_PERCENT_ATTRIBUTE_TYPE: {
         using Traits = chip::app::NumericAttributeTraits<uint8_t>;
         Traits::StorageType attribute_value;
@@ -1693,7 +1738,8 @@ static esp_err_t get_attr_val_from_data(esp_matter_attr_val_t *val, EmberAfAttri
         break;
     }
 
-    case ZCL_INT16S_ATTRIBUTE_TYPE: {
+    case ZCL_INT16S_ATTRIBUTE_TYPE:
+    case ZCL_TEMPERATURE_ATTRIBUTE_TYPE: {
         using Traits = chip::app::NumericAttributeTraits<int16_t>;
         Traits::StorageType attribute_value;
         memcpy((uint8_t *)&attribute_value, value, sizeof(Traits::StorageType));
@@ -1710,6 +1756,10 @@ static esp_err_t get_attr_val_from_data(esp_matter_attr_val_t *val, EmberAfAttri
     }
 
     case ZCL_INT16U_ATTRIBUTE_TYPE:
+    case ZCL_ENTRY_IDX_ATTRIBUTE_TYPE:
+    case ZCL_GROUP_ID_ATTRIBUTE_TYPE:
+    case ZCL_ENDPOINT_NO_ATTRIBUTE_TYPE:
+    case ZCL_VENDOR_ID_ATTRIBUTE_TYPE:
     case ZCL_PERCENT100THS_ATTRIBUTE_TYPE: {
         using Traits = chip::app::NumericAttributeTraits<uint16_t>;
         Traits::StorageType attribute_value;
@@ -1726,7 +1776,8 @@ static esp_err_t get_attr_val_from_data(esp_matter_attr_val_t *val, EmberAfAttri
         break;
     }
 
-    case ZCL_INT32S_ATTRIBUTE_TYPE: {
+    case ZCL_INT32S_ATTRIBUTE_TYPE:
+    case ZCL_INT24S_ATTRIBUTE_TYPE: {
         using Traits = chip::app::NumericAttributeTraits<int32_t>;
         Traits::StorageType attribute_value;
         memcpy((uint8_t *)&attribute_value, value, sizeof(Traits::StorageType));
@@ -1742,7 +1793,18 @@ static esp_err_t get_attr_val_from_data(esp_matter_attr_val_t *val, EmberAfAttri
         break;
     }
 
-    case ZCL_INT32U_ATTRIBUTE_TYPE: {
+    case ZCL_INT32U_ATTRIBUTE_TYPE:
+    case ZCL_TRANS_ID_ATTRIBUTE_TYPE:
+    case ZCL_CLUSTER_ID_ATTRIBUTE_TYPE:
+    case ZCL_ATTRIB_ID_ATTRIBUTE_TYPE:
+    case ZCL_FIELD_ID_ATTRIBUTE_TYPE:
+    case ZCL_EVENT_ID_ATTRIBUTE_TYPE:
+    case ZCL_COMMAND_ID_ATTRIBUTE_TYPE:
+    case ZCL_EPOCH_S_ATTRIBUTE_TYPE:
+    case ZCL_ELAPSED_S_ATTRIBUTE_TYPE:
+    case ZCL_DATA_VER_ATTRIBUTE_TYPE:
+    case ZCL_DEVTYPE_ID_ATTRIBUTE_TYPE:
+    case ZCL_INT24U_ATTRIBUTE_TYPE: {
         using Traits = chip::app::NumericAttributeTraits<uint32_t>;
         Traits::StorageType attribute_value;
         memcpy((uint8_t *)&attribute_value, value, sizeof(Traits::StorageType));
@@ -1758,7 +1820,13 @@ static esp_err_t get_attr_val_from_data(esp_matter_attr_val_t *val, EmberAfAttri
         break;
     }
 
-    case ZCL_INT64S_ATTRIBUTE_TYPE: {
+    case ZCL_INT64S_ATTRIBUTE_TYPE:
+    case ZCL_ENERGY_MWH_ATTRIBUTE_TYPE:
+    case ZCL_AMPERAGE_MA_ATTRIBUTE_TYPE:
+    case ZCL_POWER_MW_ATTRIBUTE_TYPE:
+    case ZCL_INT56S_ATTRIBUTE_TYPE:
+    case ZCL_INT48S_ATTRIBUTE_TYPE:
+    case ZCL_INT40S_ATTRIBUTE_TYPE: {
         using Traits = chip::app::NumericAttributeTraits<int64_t>;
         Traits::StorageType attribute_value;
         memcpy((uint8_t *)&attribute_value, value, sizeof(Traits::StorageType));
@@ -1774,7 +1842,17 @@ static esp_err_t get_attr_val_from_data(esp_matter_attr_val_t *val, EmberAfAttri
         break;
     }
 
-    case ZCL_INT64U_ATTRIBUTE_TYPE: {
+    case ZCL_INT64U_ATTRIBUTE_TYPE:
+    case ZCL_FABRIC_ID_ATTRIBUTE_TYPE:
+    case ZCL_NODE_ID_ATTRIBUTE_TYPE:
+    case ZCL_POSIX_MS_ATTRIBUTE_TYPE:
+    case ZCL_EPOCH_US_ATTRIBUTE_TYPE:
+    case ZCL_SYSTIME_US_ATTRIBUTE_TYPE:
+    case ZCL_SYSTIME_MS_ATTRIBUTE_TYPE:
+    case ZCL_EVENT_NO_ATTRIBUTE_TYPE:
+    case ZCL_INT56U_ATTRIBUTE_TYPE:
+    case ZCL_INT48U_ATTRIBUTE_TYPE:
+    case ZCL_INT40U_ATTRIBUTE_TYPE: {
         using Traits = chip::app::NumericAttributeTraits<uint64_t>;
         Traits::StorageType attribute_value;
         memcpy((uint8_t *)&attribute_value, value, sizeof(Traits::StorageType));
@@ -1790,7 +1868,9 @@ static esp_err_t get_attr_val_from_data(esp_matter_attr_val_t *val, EmberAfAttri
         break;
     }
 
-    case ZCL_ENUM8_ATTRIBUTE_TYPE: {
+    case ZCL_ENUM8_ATTRIBUTE_TYPE:
+    case ZCL_STATUS_ATTRIBUTE_TYPE:
+    case ZCL_PRIORITY_ATTRIBUTE_TYPE: {
         using Traits = chip::app::NumericAttributeTraits<uint8_t>;
         Traits::StorageType attribute_value;
         memcpy((uint8_t *)&attribute_value, value, sizeof(Traits::StorageType));
@@ -1854,6 +1934,22 @@ static esp_err_t get_attr_val_from_data(esp_matter_attr_val_t *val, EmberAfAttri
         break;
     }
 
+    case ZCL_BITMAP32_ATTRIBUTE_TYPE: {
+        using Traits = chip::app::NumericAttributeTraits<uint32_t>;
+        Traits::StorageType attribute_value;
+        memcpy((uint8_t *)&attribute_value, value, sizeof(Traits::StorageType));
+        if (attribute_metadata->IsNullable()) {
+            if (Traits::IsNullValue(attribute_value)) {
+                *val = esp_matter_nullable_bitmap32(nullable<uint32_t>());
+            } else {
+                *val = esp_matter_nullable_bitmap32(attribute_value);
+            }
+        } else {
+            *val = esp_matter_bitmap32(attribute_value);
+        }
+        break;
+    }
+
     case ZCL_SINGLE_ATTRIBUTE_TYPE: {
         using Traits = chip::app::NumericAttributeTraits<float>;
         Traits::StorageType attribute_value;
@@ -1881,11 +1977,8 @@ static esp_err_t get_attr_val_from_data(esp_matter_attr_val_t *val, EmberAfAttri
 void val_print(uint16_t endpoint_id, uint32_t cluster_id, uint32_t attribute_id, esp_matter_attr_val_t *val, bool is_read)
 {
     char action = (is_read) ? 'R' :'W';
-    if (val_is_null(val)) {
-        ESP_LOGI(TAG, "********** %c : Endpoint 0x%04" PRIX16 "'s Cluster 0x%08" PRIX32 "'s Attribute 0x%08" PRIX32 " is null **********", action,
-                 endpoint_id, cluster_id, attribute_id);
-        return;
-    }
+    VerifyOrReturn(!val_is_null(val), ESP_LOGI(TAG, "********** %c : Endpoint 0x%04" PRIX16 "'s Cluster 0x%08" PRIX32 "'s Attribute 0x%08" PRIX32 " is null **********", action,
+                 endpoint_id, cluster_id, attribute_id));
 
     if (val->type == ESP_MATTER_VAL_TYPE_BOOLEAN) {
         ESP_LOGI(TAG, "********** %c : Endpoint 0x%04" PRIX16 "'s Cluster 0x%08" PRIX32 "'s Attribute 0x%08" PRIX32 " is %d **********", action,
@@ -1926,11 +2019,15 @@ void val_print(uint16_t endpoint_id, uint32_t cluster_id, uint32_t attribute_id,
         ESP_LOGI(TAG, "********** %c : Endpoint 0x%04" PRIX16 "'s Cluster 0x%08" PRIX32 "'s Attribute 0x%08" PRIX32 " is %" PRIu64 " **********", action,
                  endpoint_id, cluster_id, attribute_id, val->val.u64);
     } else if (val->type == ESP_MATTER_VAL_TYPE_CHAR_STRING) {
+        const char *b = val->val.a.b ? (const char *)val->val.a.b : "(empty)";
+        uint16_t s = val->val.a.b ? val->val.a.s : strlen("(empty)");
         ESP_LOGI(TAG, "********** %c : Endpoint 0x%04" PRIX16 "'s Cluster 0x%08" PRIX32 "'s Attribute 0x%08" PRIX32 " is %.*s **********", action,
-                 endpoint_id, cluster_id, attribute_id, val->val.a.s, val->val.a.b);
+                 endpoint_id, cluster_id, attribute_id, s, b);
     } else if (val->type == ESP_MATTER_VAL_TYPE_LONG_CHAR_STRING) {
+        const char *b = val->val.a.b ? (const char *)val->val.a.b : "(empty)";
+        uint16_t s = val->val.a.b ? val->val.a.s : strlen("(empty)");
         ESP_LOGI(TAG, "********** %c : Endpoint 0x%04" PRIX16 "'s Cluster 0x%08" PRIX32 "'s Attribute 0x%08" PRIX32 " is %.*s **********", action,
-                 endpoint_id, cluster_id, attribute_id, val->val.a.s, val->val.a.b);
+                 endpoint_id, cluster_id, attribute_id, s, b);
     } else {
         ESP_LOGI(TAG, "********** %c : Endpoint 0x%04" PRIX16 "'s Cluster 0x%08" PRIX32 "'s Attribute 0x%08" PRIX32 " is <invalid type: %d> **********", action,
                  endpoint_id, cluster_id, attribute_id, val->type);
@@ -1942,10 +2039,7 @@ esp_err_t get_val_raw(uint16_t endpoint_id, uint32_t cluster_id, uint32_t attrib
 {
     /* Take lock if not already taken */
     lock::status_t lock_status = lock::chip_stack_lock(portMAX_DELAY);
-    if (lock_status == lock::FAILED) {
-        ESP_LOGE(TAG, "Could not get task context");
-        return ESP_FAIL;
-    }
+    VerifyOrReturnError(lock_status != lock::FAILED, ESP_FAIL, ESP_LOGE(TAG, "Could not get task context"));
 
     esp_err_t err = ESP_OK;
     Status status = emberAfReadAttribute(endpoint_id, cluster_id, attribute_id, value, attribute_size);
@@ -1964,10 +2058,7 @@ esp_err_t update(uint16_t endpoint_id, uint32_t cluster_id, uint32_t attribute_i
 {
     /* Take lock if not already taken */
     lock::status_t lock_status = lock::chip_stack_lock(portMAX_DELAY);
-    if (lock_status == lock::FAILED) {
-        ESP_LOGE(TAG, "Could not get task context");
-        return ESP_FAIL;
-    }
+    VerifyOrReturnError(lock_status != lock::FAILED, ESP_FAIL, ESP_LOGE(TAG, "Could not get task context"));
 
     /* Get size */
     EmberAfAttributeType attribute_type = 0;
@@ -2010,16 +2101,10 @@ esp_err_t report(uint16_t endpoint_id, uint32_t cluster_id, uint32_t attribute_i
 {
     /* Take lock if not already taken */
     lock::status_t lock_status = lock::chip_stack_lock(portMAX_DELAY);
-    if (lock_status == lock::FAILED) {
-        ESP_LOGE(TAG, "Could not get task context");
-        return ESP_FAIL;
-    }
+    VerifyOrReturnError(lock_status != lock::FAILED, ESP_FAIL, ESP_LOGE(TAG, "Could not get task context"));
 
     /* Get attribute */
-    node_t *node = node::get();
-    endpoint_t *endpoint = endpoint::get(node, endpoint_id);
-    cluster_t *cluster = cluster::get(endpoint, cluster_id);
-    attribute_t *attribute = attribute::get(cluster, attribute_id);
+    attribute_t *attribute = attribute::get(endpoint_id, cluster_id, attribute_id);
     if (!attribute) {
         ESP_LOGE(TAG, "Could not find Endpoint 0x%04" PRIX16 "'s Cluster 0x%08" PRIX32 "'s Attribute 0x%08" PRIX32, endpoint_id, cluster_id,
                  attribute_id);
@@ -2070,9 +2155,7 @@ Status MatterPreAttributeChangeCallback(const chip::app::ConcreteAttributePath &
 
     /* Callback to application */
     esp_err_t err = execute_callback(attribute::PRE_UPDATE, endpoint_id, cluster_id, attribute_id, &val);
-    if (err != ESP_OK) {
-        return Status::Failure;
-    }
+    VerifyOrReturnValue(err == ESP_OK, Status::Failure);
     return Status::Success;
 }
 
@@ -2097,22 +2180,15 @@ Status emberAfExternalAttributeReadCallback(EndpointId endpoint_id, ClusterId cl
 {
     /* Get value */
     uint32_t attribute_id = matter_attribute->attributeId;
-    node_t *node = node::get();
-    if (!node) {
-        return Status::Failure;
-    }
-    endpoint_t *endpoint = endpoint::get(node, endpoint_id);
-    cluster_t *cluster = cluster::get(endpoint, cluster_id);
-    attribute_t *attribute = attribute::get(cluster, attribute_id);
+    attribute_t *attribute = attribute::get(endpoint_id, cluster_id, attribute_id);
+    VerifyOrReturnError(attribute, Status::Failure);
     esp_matter_attr_val_t val = esp_matter_invalid(NULL);
 
     int flags = attribute::get_flags(attribute);
     if (flags & ATTRIBUTE_FLAG_OVERRIDE) {
         esp_err_t err = execute_override_callback(attribute, attribute::READ, endpoint_id, cluster_id, attribute_id,
                                                   &val);
-        if (err != ESP_OK) {
-            return Status::Failure;
-        }
+        VerifyOrReturnValue(err == ESP_OK, Status::Failure);
     } else {
         attribute::get_val(attribute, &val);
     }
@@ -2123,11 +2199,8 @@ Status emberAfExternalAttributeReadCallback(EndpointId endpoint_id, ClusterId cl
     /* Get size */
     uint16_t attribute_size = 0;
     attribute::get_data_from_attr_val(&val, NULL, &attribute_size, NULL);
-    if (attribute_size > max_read_length) {
-        ESP_LOGE(TAG, "Insufficient space for reading Endpoint 0x%04" PRIX16 "'s Cluster 0x%08" PRIX32 "'s Attribute 0x%08" PRIX32
-                ": required: %" PRIu16 ", max: %" PRIu16 "", endpoint_id, cluster_id, attribute_id, attribute_size, max_read_length);
-        return Status::ResourceExhausted;
-    }
+    VerifyOrReturnValue(attribute_size <= max_read_length, Status::ResourceExhausted, ESP_LOGE(TAG, "Insufficient space for reading Endpoint 0x%04" PRIX16 "'s Cluster 0x%08" PRIX32 "'s Attribute 0x%08" PRIX32
+                ": required: %" PRIu16 ", max: %" PRIu16 "", endpoint_id, cluster_id, attribute_id, attribute_size, max_read_length));
 
     /* Assign value */
     attribute::get_data_from_attr_val(&val, NULL, &attribute_size, buffer);
@@ -2139,13 +2212,8 @@ Status emberAfExternalAttributeWriteCallback(EndpointId endpoint_id, ClusterId c
 {
     /* Get value */
     uint32_t attribute_id = matter_attribute->attributeId;
-    node_t *node = node::get();
-    if (!node) {
-        return Status::Failure;
-    }
-    endpoint_t *endpoint = endpoint::get(node, endpoint_id);
-    cluster_t *cluster = cluster::get(endpoint, cluster_id);
-    attribute_t *attribute = attribute::get(cluster, attribute_id);
+    attribute_t *attribute = attribute::get(endpoint_id, cluster_id, attribute_id);
+    VerifyOrReturnError(attribute, Status::Failure);
 
     /* Get val */
     /* This creates a new variable val, and stores the new attribute value in the new variable.
@@ -2162,9 +2230,7 @@ Status emberAfExternalAttributeWriteCallback(EndpointId endpoint_id, ClusterId c
     }
 
     /* Update val */
-    if (val.type == ESP_MATTER_VAL_TYPE_INVALID) {
-        return Status::Failure;
-    }
+    VerifyOrReturnValue(val.type != ESP_MATTER_VAL_TYPE_INVALID, Status::Failure);
     attribute::set_val(attribute, &val);
     return Status::Success;
 }

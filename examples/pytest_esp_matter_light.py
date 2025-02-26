@@ -9,6 +9,9 @@ import subprocess
 import netifaces
 from typing import Tuple
 from pytest_embedded import Dut
+import os
+import yaml
+
 
 CURRENT_DIR_LIGHT = str(pathlib.Path(__file__).parent)+'/light'
 CHIP_TOOL_EXE = str(pathlib.Path(__file__).parent)+ '/../connectedhomeip/connectedhomeip/out/host/chip-tool'
@@ -54,7 +57,46 @@ def test_matter_commissioning_c3(dut:Dut) -> None:
     print(out_str)
     result = re.findall(r'Run command failure', str(out_str))
     if len(result) != 0:
-      assert False      
+      assert False
+
+@pytest.mark.esp32c2
+@pytest.mark.esp_matter_dut
+@pytest.mark.parametrize(
+    ' count, app_path, target, erase_all', [
+        ( 1, pytest_build_dir, 'esp32c2', 'y'),
+    ],
+    indirect=True,
+)
+
+# Matter over wifi commissioning
+def test_matter_commissioning_c2(dut:Dut) -> None:
+    light = dut
+    # BLE start advertising
+    light.expect(r'chip\[DL\]\: Configuring CHIPoBLE advertising', timeout=20)
+    # Start commissioning
+    time.sleep(5)
+    command = CHIP_TOOL_EXE + ' pairing ble-wifi 1 ChipTEH2 chiptest123 20202021 3840'
+    out_str = subprocess.getoutput(command)
+    print(out_str)
+    result = re.findall(r'Run command failure', str(out_str))
+    if len(result) != 0:
+      assert False
+    # Use toggle command to turn-off the light
+    time.sleep(3)
+    command = CHIP_TOOL_EXE + ' onoff toggle 1 1'
+    out_str = subprocess.getoutput(command)
+    print(out_str)
+    result = re.findall(r'Run command failure', str(out_str))
+    if len(result) != 0:
+      assert False
+    # Use toggle command to turn-on the light
+    time.sleep(5)
+    command = CHIP_TOOL_EXE + ' onoff toggle 1 1'
+    out_str = subprocess.getoutput(command)
+    print(out_str)
+    result = re.findall(r'Run command failure', str(out_str))
+    if len(result) != 0:
+      assert False
 
 @pytest.mark.esp32c6
 @pytest.mark.esp_matter_dut
@@ -93,14 +135,25 @@ def test_matter_commissioning_c6(dut:Dut) -> None:
     print(out_str)
     result = re.findall(r'Run command failure', str(out_str))
     if len(result) != 0:
-      assert False   
+      assert False
 
 
 # get the host interface name
 def get_host_interface_name() -> str:
-    interfaces = netifaces.interfaces()
-    interface_name = [s for s in interfaces if 'wl' in s][0]
-    return str(interface_name)
+    home_dir = os.path.expanduser("~")
+    config_path = os.path.join(home_dir, "config", "env_config.yml")
+    if os.path.exists(config_path):
+        with open(config_path, 'r') as file:
+            config = yaml.safe_load(file)
+        interface_name = config.get("interface_name")
+        if interface_name:
+            return str(interface_name)
+        else:
+            print("Warning: Configuration file found but 'interface_name' is not defined.")
+  
+    if "eth1" in netifaces.interfaces():
+        return "eth1"
+    raise Exception("No valid network interface found. Please ensure 'eth1' exists or configure 'interface_name' in config/env_config file.")
 
 
 # reset host interface
@@ -211,6 +264,8 @@ def test_matter_commissioning_h2(dut:Tuple[Dut, Dut]) -> None:
     ot_br.write('dataset active -x')
     dataset=ot_br.expect(r'\n(\w{202}\r)', timeout=5)[1].decode()
     print(dataset)
+    ot_br.expect('Got IPv6 event: Interface "example_netif_sta" address: fdde:ad00:beef:cafe', timeout=30)
+    print("Got unique local ipv6 address")
     # Start commissioning
     time.sleep(2)
     command = CHIP_TOOL_EXE + " pairing ble-thread 1 hex:{} ".format(dataset.strip())+"20202021 3840"

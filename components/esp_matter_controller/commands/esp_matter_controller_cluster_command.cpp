@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <DataModelLogger.h>
+#include <commands/clusters/DataModelLogger.h>
 #include <controller/CommissioneeDeviceProxy.h>
 #include <esp_check.h>
 #include <esp_matter_controller_client.h>
@@ -23,12 +23,14 @@
 
 #include <app/server/Server.h>
 #include <crypto/CHIPCryptoPAL.h>
+#include <lib/core/Optional.h>
 #include <setup_payload/ManualSetupPayloadGenerator.h>
 #include <setup_payload/QRCodeSetupPayloadGenerator.h>
 #include <setup_payload/SetupPayload.h>
 
 using namespace chip::app::Clusters;
 using namespace esp_matter::cluster;
+using namespace esp_matter::client;
 static const char *TAG = "cluster_command";
 
 namespace esp_matter {
@@ -41,14 +43,8 @@ esp_err_t decode_command_response(const ConcreteCommandPath &command_path, TLVRe
     ESP_RETURN_ON_FALSE(reader, ESP_ERR_INVALID_ARG, TAG, "reader cannot be NULL");
     ESP_RETURN_ON_FALSE(command_path.mClusterId == CommandResponseObjectT::GetClusterId() &&
                             command_path.mCommandId == CommandResponseObjectT::GetCommandId(),
-                        ESP_ERR_INVALID_ARG, TAG, "Wrong command to decode");
-    CommandResponseObjectT response;
-    ESP_RETURN_ON_FALSE(chip::app::DataModel::Decode(*reader, response) == CHIP_NO_ERROR, ESP_FAIL, TAG,
-                        "Failed to decode response ");
-    char header[64] = {0};
-    snprintf(header, 64, "cluster-0x%" PRIX32 ", command-0x%" PRIX32 " response:", command_path.mClusterId,
-             command_path.mCommandId);
-    DataModelLogger::LogValue(header, 1, response);
+                            ESP_ERR_INVALID_ARG, TAG, "Wrong command to decode");
+    DataModelLogger::LogCommand(command_path, reader);
     return ESP_OK;
 }
 
@@ -153,8 +149,8 @@ void cluster_command::on_device_connected_fcn(void *context, ExchangeManager &ex
     chip::OperationalDeviceProxy device_proxy(&exchangeMgr, sessionHandle);
     chip::app::CommandPathParams command_path = {cmd->m_endpoint_id, 0, cmd->m_cluster_id, cmd->m_command_id,
                                                  chip::app::CommandPathFlags::kEndpointIdValid};
-    custom::command::send_command(context, &device_proxy, command_path, cmd->m_command_data_field, cmd->on_success_cb,
-                                  cmd->on_error_cb, chip::NullOptional);
+    interaction::invoke::send_request(context, &device_proxy, command_path, cmd->m_command_data_field,
+                                      cmd->on_success_cb, cmd->on_error_cb, cmd->m_timed_invoke_timeout_ms);
     chip::Platform::Delete(cmd);
     return;
 }
@@ -210,15 +206,11 @@ esp_err_t cluster_command::dispatch_group_command(void *context)
 #ifdef CONFIG_ESP_MATTER_ENABLE_MATTER_SERVER
     uint8_t fabric_index = get_fabric_index();
 #else
-#ifdef CONFIG_ESP_MATTER_COMMISSIONER_ENABLE
-    uint8_t fabric_index = matter_controller_client::get_instance().get_commissioner()->GetFabricIndex();
-#else
-    uint8_t fabric_index = matter_controller_client::get_instance().get_controller()->GetFabricIndex();
-#endif // CONFIG_ESP_MATTER_COMMISSIONER_ENABLE
+    uint8_t fabric_index = matter_controller_client::get_instance().get_fabric_index();
 #endif // CONFIG_ESP_MATTER_ENABLE_MATTER_SERVER
     chip::app::CommandPathParams command_path = {cmd->m_endpoint_id, group_id, cmd->m_cluster_id, cmd->m_command_id,
                                                  chip::app::CommandPathFlags::kGroupIdValid};
-    err = custom::command::send_group_command(fabric_index, command_path, cmd->m_command_data_field);
+    err = interaction::invoke::send_group_request(fabric_index, command_path, cmd->m_command_data_field);
     chip::Platform::Delete(cmd);
     return err;
 }
@@ -254,14 +246,11 @@ esp_err_t cluster_command::send_command()
 }
 
 esp_err_t send_invoke_cluster_command(uint64_t destination_id, uint16_t endpoint_id, uint32_t cluster_id,
-                                      uint32_t command_id, const char *command_data_field)
+                                      uint32_t command_id, const char *command_data_field,
+                                      chip::Optional<uint16_t> timed_invoke_timeout_ms)
 {
-    if (command_data_field && strlen(command_data_field) >= k_command_data_field_buffer_size) {
-        ESP_LOGE(TAG, "The command data field buffer is too small for this command, please increase the buffer size");
-        return ESP_ERR_INVALID_ARG;
-    }
-    cluster_command *cmd =
-        chip::Platform::New<cluster_command>(destination_id, endpoint_id, cluster_id, command_id, command_data_field);
+    cluster_command *cmd = chip::Platform::New<cluster_command>(destination_id, endpoint_id, cluster_id, command_id,
+                                                                command_data_field, timed_invoke_timeout_ms);
     if (!cmd) {
         ESP_LOGE(TAG, "Failed to alloc memory for cluster_command");
         return ESP_ERR_NO_MEM;

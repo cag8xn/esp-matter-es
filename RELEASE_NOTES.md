@@ -1,3 +1,34 @@
+# 27-December-2024
+
+Added ``matter esp factoryreset`` command to factory reset a Matter device.
+This command erases the esp-matter and connectedhomeip SDK's non-volatile storage.
+
+# 15-Oct-2024
+
+API Change
+```
+esp_err_t get_bounds(attribute_t *attribute, esp_matter_attr_bounds_t *bounds);
+```
+- Above API returns the `esp_err_t` and has parameter `bounds`.
+
+# 28-Aug-2024
+
+- Removed the configurability of the NameSupport attribute of the Groups cluster and enabled
+  it by default. The NameSupport and feature-map attributes of the Groups cluster must be kept
+  in sync, the connectedhomeip SDK enables the GroupName feature by default and set the
+  NameSupport attribute to appropriate value.
+
+# 08-July-2024
+- Changed diagnostic cluster namespaces as per the matter specifications
+  - diagnostics_network_wifi -> wifi_network_diagnotics  
+  - diagnostics_network_thread -> thread_network_diagnostics  
+  - diagnostics_network_ethernet -> ethernet_network_diagnostics
+
+# 07-May-2024
+
+- `tools/mfg_tool.py` is moved to https://github.com/espressif/esp-matter-tools/tree/main/mfg_tool
+  and can be installed by running `python3 -m pip install esp-matter-mfg-tool`.
+
 # 14-February-2024
 
 - An optional argument, `max_val_size`, has been introduced to the `esp_matter::attribute::create()` API.

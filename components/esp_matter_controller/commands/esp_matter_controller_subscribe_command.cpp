@@ -15,12 +15,14 @@
 #include <app/server/Server.h>
 #include <controller/CommissioneeDeviceProxy.h>
 #include <esp_log.h>
+#include <esp_matter_client.h>
 #include <esp_matter_controller_client.h>
 #include <esp_matter_controller_subscribe_command.h>
 
-#include "DataModelLogger.h"
+#include <commands/clusters/DataModelLogger.h>
 
 using namespace chip::app::Clusters;
+using namespace esp_matter::client;
 using chip::DeviceProxy;
 using chip::app::InteractionModelEngine;
 using chip::app::ReadClient;
@@ -37,40 +39,12 @@ void subscribe_command::on_device_connected_fcn(void *context, ExchangeManager &
                                                 const SessionHandle &sessionHandle)
 {
     subscribe_command *cmd = (subscribe_command *)context;
-    ReadPrepareParams params(sessionHandle);
-    CHIP_ERROR err = CHIP_NO_ERROR;
-    if (cmd->m_attr_paths.AllocatedSize() == 0 && cmd->m_event_paths.AllocatedSize() == 0) {
-        ESP_LOGE(TAG, "Cannot send Subscribe command with NULL attribute path and NULL event path");
-        chip::Platform::Delete(cmd);
-        return;
-    }
-
-    params.mpAttributePathParamsList = cmd->m_attr_paths.Get();
-    params.mAttributePathParamsListSize = cmd->m_attr_paths.AllocatedSize();
-    params.mpEventPathParamsList = cmd->m_event_paths.Get();
-    params.mEventPathParamsListSize = cmd->m_event_paths.AllocatedSize();
-    params.mIsFabricFiltered = 0;
-    params.mpDataVersionFilterList = nullptr;
-    params.mDataVersionFilterListSize = 0;
-    params.mMinIntervalFloorSeconds = cmd->m_min_interval;
-    params.mMaxIntervalCeilingSeconds = cmd->m_max_interval;
-    params.mKeepSubscriptions = true;
-
-    ReadClient *client =
-        chip::Platform::New<ReadClient>(InteractionModelEngine::GetInstance(), &exchangeMgr, cmd->m_buffered_read_cb,
-                                        ReadClient::InteractionType::Subscribe);
-    if (!client) {
-        ESP_LOGE(TAG, "Failed to alloc memory for read client");
-        chip::Platform::Delete(cmd);
-    }
-    if (cmd->m_auto_resubscribe) {
-        err = client->SendAutoResubscribeRequest(std::move(params));
-    } else {
-        err = client->SendRequest(params);
-    }
-    if (err != CHIP_NO_ERROR) {
-        ESP_LOGE(TAG, "Failed to send read request");
-        chip::Platform::Delete(client);
+    chip::OperationalDeviceProxy device_proxy(&exchangeMgr, sessionHandle);
+    esp_err_t err = interaction::subscribe::send_request(
+        &device_proxy, cmd->m_attr_paths.Get(), cmd->m_attr_paths.AllocatedSize(), cmd->m_event_paths.Get(),
+        cmd->m_event_paths.AllocatedSize(), cmd->m_min_interval, cmd->m_max_interval, cmd->m_keep_subscription,
+        cmd->m_auto_resubscribe, cmd->m_buffered_read_cb);
+    if (err != ESP_OK) {
         chip::Platform::Delete(cmd);
     }
     return;
@@ -200,7 +174,6 @@ CHIP_ERROR subscribe_command::OnResubscriptionNeeded(ReadClient *apReadClient, C
 void subscribe_command::OnDone(ReadClient *apReadClient)
 {
     ESP_LOGI(TAG, "Subscription 0x%" PRIx32 " Done for remote node 0x%" PRIx64, m_subscription_id, m_node_id);
-    chip::Platform::Delete(apReadClient);
     if (subscribe_done_cb) {
         // This will be called when the subscription is terminated.
         subscribe_done_cb(m_node_id, m_subscription_id);
@@ -211,7 +184,7 @@ void subscribe_command::OnDone(ReadClient *apReadClient)
 esp_err_t send_subscribe_attr_command(uint64_t node_id, ScopedMemoryBufferWithSize<uint16_t> &endpoint_ids,
                                       ScopedMemoryBufferWithSize<uint32_t> &cluster_ids,
                                       ScopedMemoryBufferWithSize<uint32_t> &attribute_ids, uint16_t min_interval,
-                                      uint16_t max_interval, bool auto_resubscribe)
+                                      uint16_t max_interval, bool auto_resubscribe, bool keep_subscription)
 {
     if (endpoint_ids.AllocatedSize() != cluster_ids.AllocatedSize() ||
         endpoint_ids.AllocatedSize() != attribute_ids.AllocatedSize()) {
@@ -232,7 +205,8 @@ esp_err_t send_subscribe_attr_command(uint64_t node_id, ScopedMemoryBufferWithSi
     }
 
     subscribe_command *cmd = chip::Platform::New<subscribe_command>(
-        node_id, std::move(attr_paths), std::move(event_paths), min_interval, max_interval, auto_resubscribe);
+        node_id, std::move(attr_paths), std::move(event_paths), min_interval, max_interval, auto_resubscribe, nullptr,
+        nullptr, nullptr, nullptr, keep_subscription);
     if (!cmd) {
         ESP_LOGE(TAG, "Failed to alloc memory for subscribe_command");
         return ESP_ERR_NO_MEM;
@@ -243,7 +217,7 @@ esp_err_t send_subscribe_attr_command(uint64_t node_id, ScopedMemoryBufferWithSi
 esp_err_t send_subscribe_event_command(uint64_t node_id, ScopedMemoryBufferWithSize<uint16_t> &endpoint_ids,
                                        ScopedMemoryBufferWithSize<uint32_t> &cluster_ids,
                                        ScopedMemoryBufferWithSize<uint32_t> &event_ids, uint16_t min_interval,
-                                       uint16_t max_interval, bool auto_resubscribe)
+                                       uint16_t max_interval, bool auto_resubscribe, bool keep_subscription)
 {
     if (endpoint_ids.AllocatedSize() != cluster_ids.AllocatedSize() ||
         endpoint_ids.AllocatedSize() != event_ids.AllocatedSize()) {
@@ -264,7 +238,8 @@ esp_err_t send_subscribe_event_command(uint64_t node_id, ScopedMemoryBufferWithS
     }
 
     subscribe_command *cmd = chip::Platform::New<subscribe_command>(
-        node_id, std::move(attr_paths), std::move(event_paths), min_interval, max_interval, auto_resubscribe);
+        node_id, std::move(attr_paths), std::move(event_paths), min_interval, max_interval, auto_resubscribe, nullptr,
+        nullptr, nullptr, nullptr, keep_subscription);
     if (!cmd) {
         ESP_LOGE(TAG, "Failed to alloc memory for subscribe_command");
         return ESP_ERR_NO_MEM;
@@ -274,7 +249,7 @@ esp_err_t send_subscribe_event_command(uint64_t node_id, ScopedMemoryBufferWithS
 
 esp_err_t send_subscribe_attr_command(uint64_t node_id, uint16_t endpoint_id, uint32_t cluster_id,
                                       uint32_t attribute_id, uint16_t min_interval, uint16_t max_interval,
-                                      bool auto_resubscribe)
+                                      bool auto_resubscribe, bool keep_subscription)
 {
     ScopedMemoryBufferWithSize<uint16_t> endpoint_ids;
     ScopedMemoryBufferWithSize<uint32_t> cluster_ids;
@@ -286,11 +261,12 @@ esp_err_t send_subscribe_attr_command(uint64_t node_id, uint16_t endpoint_id, ui
         return ESP_ERR_NO_MEM;
     }
     return send_subscribe_attr_command(node_id, endpoint_ids, cluster_ids, attribute_ids, min_interval, max_interval,
-                                       auto_resubscribe);
+                                       auto_resubscribe, keep_subscription);
 }
 
 esp_err_t send_subscribe_event_command(uint64_t node_id, uint16_t endpoint_id, uint32_t cluster_id, uint32_t event_id,
-                                       uint16_t min_interval, uint16_t max_interval, bool auto_resubscribe)
+                                       uint16_t min_interval, uint16_t max_interval, bool auto_resubscribe,
+                                       bool keep_subscription)
 {
     ScopedMemoryBufferWithSize<uint16_t> endpoint_ids;
     ScopedMemoryBufferWithSize<uint32_t> cluster_ids;
@@ -302,23 +278,41 @@ esp_err_t send_subscribe_event_command(uint64_t node_id, uint16_t endpoint_id, u
         return ESP_ERR_NO_MEM;
     }
     return send_subscribe_event_command(node_id, endpoint_ids, cluster_ids, event_ids, min_interval, max_interval,
-                                        auto_resubscribe);
+                                        auto_resubscribe, keep_subscription);
 }
 
 esp_err_t send_shutdown_subscription(uint64_t node_id, uint32_t subscription_id)
 {
-    if (CHIP_NO_ERROR !=
-        InteractionModelEngine::GetInstance()->ShutdownSubscription(
-#if CONFIG_ESP_MATTER_COMMISSIONER_ENABLE
-            ScopedNodeId(node_id, matter_controller_client::get_instance().get_commissioner()->GetFabricIndex()),
-            subscription_id)) {
+#ifdef CONFIG_ESP_MATTER_ENABLE_MATTER_SERVER
+    chip::FabricIndex fabric_index = get_fabric_index();
 #else
-            ScopedNodeId(node_id, /* fabric index */ 1), subscription_id)) {
+    chip::FabricIndex fabric_index = matter_controller_client::get_instance().get_fabric_index();
 #endif
+    if (CHIP_NO_ERROR !=
+        InteractionModelEngine::GetInstance()->ShutdownSubscription(ScopedNodeId(node_id, fabric_index),
+                                                                    subscription_id)) {
         ESP_LOGE(TAG, "Shutdown Subscription Failed");
         return ESP_FAIL;
     }
     return ESP_OK;
+}
+
+void send_shutdown_subscriptions(uint64_t node_id)
+{
+#ifdef CONFIG_ESP_MATTER_ENABLE_MATTER_SERVER
+    chip::FabricIndex fabric_index = get_fabric_index();
+#else
+    chip::FabricIndex fabric_index = matter_controller_client::get_instance().get_fabric_index();
+#endif
+
+    InteractionModelEngine::GetInstance()->ShutdownSubscriptions(fabric_index, node_id);
+    ESP_LOGI(TAG, "Shutdown Subscriptions for node:0x%llx", node_id);
+}
+
+void send_shutdown_all_subscriptions()
+{
+    InteractionModelEngine::GetInstance()->ShutdownAllSubscriptions();
+    ESP_LOGI(TAG, "Shutdown all Subscriptions");
 }
 
 } // namespace controller
