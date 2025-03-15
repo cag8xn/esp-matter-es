@@ -6,12 +6,9 @@
    CONDITIONS OF ANY KIND, either express or implied.
 */
 
-#include <esp_log.h>
+
 #include <stdlib.h>
 #include <string.h>
-//#include "driver/ledc.h"
-#include "driver/mcpwm.h"
-#include "soc/mcpwm_periph.h"
 #include <device.h>
 #include <math.h>
 #include "freertos/FreeRTOS.h"
@@ -20,8 +17,17 @@
 
 #include <esp_matter.h>
 #include "bsp/esp-bsp.h"
-
 #include <app_priv.h>
+
+#include <stdio.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <driver/gpio.h>
+#include <esp_log.h>
+#include <unistd.h>
+#include <stdbool.h>
+#include <cmath> // For std::round
+
 
 using namespace chip::app::Clusters;
 using namespace esp_matter;
@@ -30,53 +36,218 @@ using namespace esp_matter::cluster;
 static const char *TAG = "app_driver";
 extern uint16_t blinds_endpoint_id;
 
-// Define the number of servos
-#define NUM_SERVOS 4 
+// --- Configuration ---
+#define STEP_PIN GPIO_NUM_18
+#define DIR_PIN GPIO_NUM_19
+#define ENABLE_PIN GPIO_NUM_5 // Optional, active low
 
-// Define GPIO pin connected to the signal input of the servo
-//#define SERVO1_GPIO 13
-//#define SERVO2_GPIO 25
-//#define SERVO3_GPIO 33
-//#define SERVO4_GPIO 32
+#define TOP_LIMIT_SWITCH_PIN GPIO_NUM_25
+#define BOTTOM_LIMIT_SWITCH_PIN GPIO_NUM_26
 
-#define SERVO1_GPIO 13
-#define SERVO2_GPIO 12
-#define SERVO3_GPIO 14
-#define SERVO4_GPIO 25
+#define STEPS_PER_REVOLUTION 200 // Adjust based on your motor
+#define MICROSTEPPING 1        // Adjust based on your DRV8825 settings
+#define DEFAULT_STEP_DELAY_US 800 // Adjust for desired speed
 
-#define release_open        20  //OK
-#define release_locked      130 //OK
-#define tensioner_loose     30  //OK
-#define tensioner_charged   110 //OK
-#define lid_closed          0   //OK
-#define lid_open            150//165 //OK
-#define lid_reload          115
-#define reload_closed       125 //OK
-#define reload_open         30  //OK
-
-// Define servo names
-const char* servo_names[NUM_SERVOS] = {"Release", "Tensioner", "Lid", "Reload"};
-
-// Define GPIO pins for each servo
-const int servo_pins[NUM_SERVOS] = {SERVO1_GPIO, SERVO2_GPIO, SERVO3_GPIO, SERVO4_GPIO};
-
-// Define two separate units
-const mcpwm_unit_t servo_pwm_unit[NUM_SERVOS] = {MCPWM_UNIT_0, MCPWM_UNIT_1, MCPWM_UNIT_0, MCPWM_UNIT_1};
-
-// Define two separate timers
-const mcpwm_timer_t servo_pwm_timer[NUM_SERVOS] = {MCPWM_TIMER_0, MCPWM_TIMER_0, MCPWM_TIMER_1, MCPWM_TIMER_1};
-
-// Define MCPWM output signals for each servo
-const mcpwm_io_signals_t servo_pwm_signals[NUM_SERVOS] = {MCPWM0A, MCPWM0B, MCPWM1A, MCPWM1B};
-
-// Define MCPWM generators for each servo
-const mcpwm_generator_t servo_pwm_generator[NUM_SERVOS] = {MCPWM_OPR_A, MCPWM_OPR_B, MCPWM_OPR_A, MCPWM_OPR_B};
+#define direction_up 1
+#define direction_down 0
 
 
-// Define parameters for the servo motor
-#define SERVO_MIN_PULSEWIDTH 500  // Minimum pulse width in microseconds
-#define SERVO_MAX_PULSEWIDTH 2500 // Maximum pulse width in microseconds
-#define SERVO_MAX_DEGREE 180       // Maximum angle in degrees servo can rotate
+class BlindDriver {
+private:
+    bool is_calibrated = false;
+    int max_steps = 0; // Steps from bottom limit to top limit
+    volatile int current_position_steps = 0; // Current position in steps
+
+    void configure_gpio();
+    void step_motor(bool direction, int steps, int delay_us);
+    bool is_top_limit_reached();
+    bool is_bottom_limit_reached();
+    int percent_to_steps(uint16_t percent);
+    uint16_t steps_to_percent(int steps);
+
+public:
+    BlindDriver();
+    void calibrate();
+    void move_to_percent(uint16_t target_percent);
+    uint16_t get_current_percent();
+    void init();
+};
+
+BlindDriver::BlindDriver() {}
+
+// --- GPIO Configuration ---
+void BlindDriver::configure_gpio() {
+    gpio_config_t io_conf = {};
+    io_conf.intr_type = GPIO_INTR_DISABLE;
+    io_conf.mode = GPIO_MODE_OUTPUT;
+    io_conf.pin_bit_mask = (1ULL << STEP_PIN) | (1ULL << DIR_PIN);
+    ESP_ERROR_CHECK(gpio_config(&io_conf));
+    gpio_set_level(STEP_PIN, 0);
+    gpio_set_level(DIR_PIN, 0);
+
+    // Configure optional ENABLE pin
+    io_conf.pin_bit_mask = (1ULL << ENABLE_PIN);
+    ESP_ERROR_CHECK(gpio_config(&io_conf));
+    gpio_set_level(ENABLE_PIN, 1); // Disable motor initially
+
+    // Configure limit switch pins as inputs with pull-up
+    io_conf.mode = GPIO_MODE_INPUT;
+    io_conf.pull_up_en = GPIO_PULLUP_ENABLE;
+    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    io_conf.pin_bit_mask = (1ULL << TOP_LIMIT_SWITCH_PIN) | (1ULL << BOTTOM_LIMIT_SWITCH_PIN);
+    ESP_ERROR_CHECK(gpio_config(&io_conf));
+}
+
+// --- Limit Switch Readings ---
+bool BlindDriver::is_top_limit_reached() {
+    return gpio_get_level(TOP_LIMIT_SWITCH_PIN) == 0; // Assuming switch pulls low when active
+}
+
+bool BlindDriver::is_bottom_limit_reached() {
+    return gpio_get_level(BOTTOM_LIMIT_SWITCH_PIN) == 0; // Assuming switch pulls low when active
+}
+
+// --- Stepper Motor Control ---
+void BlindDriver::step_motor(bool direction, int steps, int delay_us) {
+    if (!is_calibrated) {
+        ESP_LOGW(TAG, "Motor not calibrated, cannot move.");
+        return;
+    }
+
+    gpio_set_level(ENABLE_PIN, 0); // Enable the motor
+    gpio_set_level(DIR_PIN, direction);
+
+    int steps_moved = 0;
+    while (steps_moved < steps) {
+        // Safety check for limit switches
+        if (is_top_limit_reached() || is_bottom_limit_reached()) {
+            ESP_LOGW(TAG, "Limit switch triggered, stopping movement.");
+            break;
+        }
+
+        gpio_set_level(STEP_PIN, 1);
+        usleep(delay_us);
+        gpio_set_level(STEP_PIN, 0);
+        usleep(delay_us);
+
+        steps_moved++;
+        if (direction) {
+            current_position_steps++;
+        } else {
+            current_position_steps--;
+        }
+    }
+
+    gpio_set_level(ENABLE_PIN, 1); // Disable the motor
+    ESP_LOGI(TAG, "Moved %d steps in direction %d. Current position: %d", steps_moved, direction, current_position_steps);
+}
+
+// --- Position Conversion ---
+int BlindDriver::percent_to_steps(uint16_t percent) {
+    if (!is_calibrated || max_steps == 0) {
+        ESP_LOGW(TAG, "Cannot convert percentage to steps, motor not calibrated.");
+        return current_position_steps; // Return current position if not calibrated
+    }
+    return static_cast<int>(std::round(static_cast<double>(percent) * max_steps / 10000.0));
+}
+
+uint16_t BlindDriver::steps_to_percent(int steps) {
+    if (!is_calibrated || max_steps == 0) {
+        ESP_LOGW(TAG, "Cannot convert steps to percentage, motor not calibrated.");
+        return 0;
+    }
+    return static_cast<uint16_t>(std::round(static_cast<double>(steps) * 10000.0 / max_steps));
+}
+
+// --- Calibration Function ---
+void BlindDriver::calibrate() {
+    ESP_LOGI(TAG, "Starting blind calibration...");
+    configure_gpio(); // Ensure GPIOs are configured
+
+    // Move down until bottom limit is reached
+    ESP_LOGI(TAG, "Moving down to find bottom limit...");
+    gpio_set_level(ENABLE_PIN, 0);
+    gpio_set_level(DIR_PIN, direction_down); // Set direction down
+    while (!is_bottom_limit_reached()) {
+        gpio_set_level(STEP_PIN, 1);
+        usleep(DEFAULT_STEP_DELAY_US);
+        gpio_set_level(STEP_PIN, 0);
+        usleep(DEFAULT_STEP_DELAY_US);
+        //vTaskDelay(pdMS_TO_TICKS(10)); // Small delay to allow switch to settle
+    }
+    gpio_set_level(ENABLE_PIN, 1);
+    current_position_steps = 0; // Reset position to 0 at bottom limit
+    ESP_LOGI(TAG, "Bottom limit reached.");
+    vTaskDelay(pdMS_TO_TICKS(1000)); // Wait a bit
+
+    // Move up until top limit is reached
+    ESP_LOGI(TAG, "Moving up to find top limit...");
+    gpio_set_level(ENABLE_PIN, 0);
+    gpio_set_level(DIR_PIN, direction_up); // Set direction up
+    int steps_counted = 0;
+    while (!is_top_limit_reached()) {
+        gpio_set_level(STEP_PIN, 1);
+        usleep(DEFAULT_STEP_DELAY_US);
+        gpio_set_level(STEP_PIN, 0);
+        usleep(DEFAULT_STEP_DELAY_US);
+        steps_counted++;
+        //vTaskDelay(pdMS_TO_TICKS(10)); // Small delay
+    }
+    gpio_set_level(ENABLE_PIN, 1);
+    max_steps = steps_counted;
+    is_calibrated = true;
+    ESP_LOGI(TAG, "Top limit reached. Calibration complete. Max steps: %d", max_steps);
+}
+
+// --- Move to Target Position Function ---
+void BlindDriver::move_to_percent(uint16_t target_percent) {
+    if (!is_calibrated) {
+        ESP_LOGW(TAG, "Cannot move to target, motor not calibrated.");
+        return;
+    }
+
+    int target_steps = percent_to_steps(target_percent);
+    ESP_LOGI(TAG, "Moving to target percentage: %d (steps: %d). Current position: %d",
+             target_percent, target_steps, current_position_steps);
+
+    int steps_to_move = target_steps - current_position_steps;
+    bool direction = (steps_to_move > 0);
+    int abs_steps_to_move = std::abs(steps_to_move);
+
+    if (abs_steps_to_move > 0) {
+        step_motor(direction, abs_steps_to_move, DEFAULT_STEP_DELAY_US);
+    } else {
+        ESP_LOGI(TAG, "Target position is the same as current position.");
+    }
+}
+
+// --- Get Current Position ---
+uint16_t BlindDriver::get_current_percent() {
+    return steps_to_percent(current_position_steps);
+}
+
+// --- Driver Initialization ---
+void BlindDriver::init() {
+    configure_gpio();
+    ESP_LOGI(TAG, "Blind driver initialized.");
+    // Calibration will be called separately after boot, as requested.
+}
+
+// --- Global Instance of the Driver ---
+static BlindDriver blind_driver;
+
+void blind_driver_calibrate() {
+    blind_driver.calibrate();
+}
+
+void blind_driver_move_to_percent(uint16_t target_percent) {
+    blind_driver.move_to_percent(target_percent);
+}
+
+uint16_t blind_driver_get_current_percent() {
+    return blind_driver.get_current_percent();
+}
+
 
 // ELIA: Following code TOGGLES the OnOff attribute.
 static void toggle_OnOff_attribute() {
@@ -95,119 +266,8 @@ static void toggle_OnOff_attribute() {
     attribute::update(endpoint_id, cluster_id, attribute_id, &val);
 }
 
-/* Do any conversions/remapping for the actual value here */
-/*ELIA MODS*/
-int angle_to_duty(int angle){
-    int result = static_cast<int>((static_cast<double>(angle) / SERVO_MAX_DEGREE) * (SERVO_MAX_PULSEWIDTH - SERVO_MIN_PULSEWIDTH) + SERVO_MIN_PULSEWIDTH);
-    return result;
-}
-
-static void drive_servo_smoothly(int servo_id, int start, int end, int total_delay) {
-    // ALERT: delay_time_ms cannot be less than 10!! A certain value of num_steps implies a certain minimum total delay!!
-    const int num_steps = 100;
-    const int delay_time_ms = total_delay / num_steps;
-    const int start_duty = angle_to_duty(start);
-    const int end_duty = angle_to_duty(end);
-    
-    // Iterate through a number of steps to smoothly change the duty cycle from start to end
-    // The angle varies from 0 to pi/2, creating a sinusoidal increment in duty cycle
-    for (int i = 0; i < num_steps; i++) {
-        double angle = M_PI/2 * i / (num_steps - 1); // Angle ranges from 0 to pi/2
-        double duty = sin(angle) * sin(angle) * (end_duty - start_duty) + start_duty;
-        mcpwm_set_duty_in_us(servo_pwm_unit[servo_id], servo_pwm_timer[servo_id], servo_pwm_generator[servo_id], duty);
-        // Wait for a short duration
-        vTaskDelay(delay_time_ms / portTICK_PERIOD_MS);
-    }
-}
-
-static void drive_servo_linearly(int servo_id, int start, int end, int total_delay) {
-    // ALERT: delay_time_ms cannot be less than 10!! A certain value of num_steps implies a certain minimum total delay!!
-    const int num_steps = 100;
-    const int delay_time_ms = total_delay / num_steps;
-    const int start_duty = angle_to_duty(start);
-    const int end_duty = angle_to_duty(end);
-    
-    // Iterate through a number of steps to linearly change the duty cycle from start to end
-    for (int i = 0; i < num_steps; i++) {
-        //double duty = i / num_steps * (end_duty - start_duty) + start_duty;
-        double duty = static_cast<double>(i) / num_steps * (end_duty - start_duty) + start_duty;
-        mcpwm_set_duty_in_us(servo_pwm_unit[servo_id], servo_pwm_timer[servo_id], servo_pwm_generator[servo_id], duty);
-        // Wait for a short duration
-        vTaskDelay(delay_time_ms / portTICK_PERIOD_MS);
-    }
-}
-
 static void launch(void *pvParameters) {
-    mcpwm_config_t pwm_config;
-    pwm_config.frequency = 50;  // Set frequency to 50Hz, suitable for most servos
-    pwm_config.cmpr_a = 0;      // Initial duty cycle
-    pwm_config.counter_mode = MCPWM_UP_COUNTER;
-    pwm_config.duty_mode = MCPWM_DUTY_MODE_0;
-    //mcpwm_init(MCPWM_UNIT_0, MCPWM_TIMER_0, &pwm_config);
-    //mcpwm_init(MCPWM_UNIT_0, MCPWM_TIMER_1, &pwm_config);
-
-    // Initialize and configure MCPWM for each servo
-    for (int servo_id = 0; servo_id < NUM_SERVOS; servo_id++) {
-        ESP_LOGI(TAG, "Initializing %s with GPIO pin %d", servo_names[servo_id], servo_pins[servo_id]);
-        mcpwm_gpio_init(servo_pwm_unit[servo_id], servo_pwm_signals[servo_id], servo_pins[servo_id]);
-        // Use separate timers for each servo
-        mcpwm_init(servo_pwm_unit[servo_id], servo_pwm_timer[servo_id], &pwm_config);
-        mcpwm_set_duty_in_us(servo_pwm_unit[servo_id], servo_pwm_timer[servo_id], servo_pwm_generator[servo_id], 0);
-    }
-
-    //vTaskDelay(5000 / portTICK_PERIOD_MS);
-    int duty = angle_to_duty(tensioner_loose);
-    mcpwm_set_duty_in_us(servo_pwm_unit[1], servo_pwm_timer[1], servo_pwm_generator[1], duty);
-    duty = angle_to_duty(reload_closed);
-    mcpwm_set_duty_in_us(servo_pwm_unit[3], servo_pwm_timer[3], servo_pwm_generator[3], duty);
-    vTaskDelay(300 / portTICK_PERIOD_MS);
-    duty = angle_to_duty(release_locked);
-    mcpwm_set_duty_in_us(servo_pwm_unit[0], servo_pwm_timer[0], servo_pwm_generator[0], duty);
-    duty = angle_to_duty(lid_closed);
-    mcpwm_set_duty_in_us(servo_pwm_unit[2], servo_pwm_timer[2], servo_pwm_generator[2], duty);
-    vTaskDelay(1000 / portTICK_PERIOD_MS);
-
-    // Open lid
-    drive_servo_smoothly(2, lid_closed, lid_open, 1500);
-    vTaskDelay(100 / portTICK_PERIOD_MS);
-
-    // Charge tensioner
-    drive_servo_linearly(1, tensioner_loose, tensioner_charged, 1000);
-    vTaskDelay(200 / portTICK_PERIOD_MS);
-
-    // Release lock
-    drive_servo_linearly(0, release_locked, release_open, 1000);
-    vTaskDelay(100 / portTICK_PERIOD_MS);
-
-    // Fold tensioner
-    drive_servo_smoothly(1, tensioner_charged, tensioner_loose, 1000);
-    vTaskDelay(300 / portTICK_PERIOD_MS);
-
-    // Lock the release and toggle reload
-    duty = angle_to_duty(release_locked);
-    mcpwm_set_duty_in_us(servo_pwm_unit[0], servo_pwm_timer[0], servo_pwm_generator[0], duty);
-    duty = angle_to_duty(reload_open);
-    mcpwm_set_duty_in_us(servo_pwm_unit[3], servo_pwm_timer[3], servo_pwm_generator[3], duty);
-    vTaskDelay(300 / portTICK_PERIOD_MS);
-    duty = angle_to_duty(reload_closed);
-    mcpwm_set_duty_in_us(servo_pwm_unit[3], servo_pwm_timer[3], servo_pwm_generator[3], duty);
-    vTaskDelay(300 / portTICK_PERIOD_MS);
-
-    // Tilt lid to reload
-    duty = angle_to_duty(lid_reload);
-    mcpwm_set_duty_in_us(servo_pwm_unit[2], servo_pwm_timer[2], servo_pwm_generator[2], duty);
-    vTaskDelay(500 / portTICK_PERIOD_MS);
-
-    // Close lid
-    drive_servo_smoothly(2, lid_reload, lid_closed, 2000);
-
-    // Stop PWM generation for each servo
-    for (int servo_id = 0; servo_id < NUM_SERVOS; servo_id++) {
-        mcpwm_set_duty_in_us(servo_pwm_unit[servo_id], servo_pwm_timer[servo_id], servo_pwm_generator[servo_id], 0);
-        mcpwm_stop(servo_pwm_unit[servo_id], servo_pwm_timer[servo_id]);
-    }
-    // Delete the task from within the function
-    vTaskDelete(NULL);
+    int i = 0;
 }
 
 static esp_err_t app_driver_blinds_set_power(led_indicator_handle_t handle, esp_matter_attr_val_t *val)
@@ -229,16 +289,6 @@ static esp_err_t app_driver_blinds_set_power(led_indicator_handle_t handle, esp_
     return ESP_OK;
 }
 
-static esp_err_t app_driver_light_set_brightness(led_indicator_handle_t handle, esp_matter_attr_val_t *val)
-{
-    int value = REMAP_TO_RANGE(val->val.u8, MATTER_BRIGHTNESS, STANDARD_BRIGHTNESS);
-#if BSP_LED_NUM > 0
-    return led_indicator_set_brightness(handle, value);
-#else
-    ESP_LOGI(TAG, "LED set brightness: %d", value);
-    return ESP_OK;
-#endif
-}
 
 static void app_driver_button_toggle_cb(void *arg, void *data)
 {
@@ -270,6 +320,13 @@ esp_err_t app_driver_attribute_update(app_driver_handle_t driver_handle, uint16_
                 // Adjust the lift percentage if needed
                 // err = app_driver_blinds_set_lift_percentage(handle, val);
                 ESP_LOGI(TAG, "8===============================D Received attribute update: TargetPositionLiftPercent100ths");
+                uint16_t target_percent;
+                // Access the uint16_t value from the esp_matter_attr_val_t structure
+
+                target_percent = val->val.u16;
+                blind_driver_move_to_percent(target_percent); // Corrected call
+                //blind_driver_calibrate();
+
             } else if (attribute_id == WindowCovering::Attributes::CurrentPositionLiftPercent100ths::Id) {
                 // Set the target lift percentage
                 // err = app_driver_blinds_set_target_lift_percentage(handle, val);
@@ -281,18 +338,14 @@ esp_err_t app_driver_attribute_update(app_driver_handle_t driver_handle, uint16_
 }
 
 
-app_driver_handle_t app_driver_blinds_init()
+esp_err_t app_driver_blinds_init(uint16_t endpoint_id)
 {
-#if BSP_LED_NUM > 0
-    /* Initialize led */
-    led_indicator_handle_t leds[BSP_LED_NUM];
-    ESP_ERROR_CHECK(bsp_led_indicator_create(leds, NULL, BSP_LED_NUM));
-    led_indicator_set_hsv(leds[0], SET_HSV(DEFAULT_HUE, DEFAULT_SATURATION, DEFAULT_BRIGHTNESS));
-    
-    return (app_driver_handle_t)leds[0];
-#else
-    return NULL;
-#endif
+    ESP_LOGI(TAG, "8===============================D INIT !!!!!");
+    blind_driver.init();
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    //usleep(2000);
+    blind_driver_calibrate();
+    return ESP_OK;
 }
 
 app_driver_handle_t app_driver_button_init()

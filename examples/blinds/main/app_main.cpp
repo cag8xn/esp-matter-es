@@ -183,5 +183,6 @@ esp_matter::endpoint_t *root_ep = endpoint::get(node, 0); // get the root node e
 esp_matter::cluster::diagnostic_logs::create(root_ep, &diag_logs_config, CLUSTER_FLAG_SERVER);
 
 esp_matter::start(app_event_cb);
+app_driver_blinds_init(blinds_endpoint_id);
 
 }
