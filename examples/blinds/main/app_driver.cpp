@@ -27,6 +27,8 @@
 #include <unistd.h>
 #include <stdbool.h>
 #include <cmath> // For std::round
+//#include <esp_matter_cluster.h>
+//#include <app/clusters/window_covering_server/window_covering_server.h>
 
 
 using namespace chip::app::Clusters;
@@ -35,11 +37,16 @@ using namespace esp_matter::cluster;
 
 static const char *TAG = "app_driver";
 extern uint16_t blinds_endpoint_id;
+extern uint16_t blinds_top_endpoint_id;
 
 // --- Configuration ---
 #define STEP_PIN GPIO_NUM_18
 #define DIR_PIN GPIO_NUM_19
 #define ENABLE_PIN GPIO_NUM_5 // Optional, active low
+
+#define STEP_PIN_TOP GPIO_NUM_21
+#define DIR_PIN_TOP GPIO_NUM_22
+#define ENABLE_PIN_TOP GPIO_NUM_35 // Optional, active low
 
 #define TOP_LIMIT_SWITCH_PIN GPIO_NUM_25
 #define BOTTOM_LIMIT_SWITCH_PIN GPIO_NUM_26
@@ -50,6 +57,24 @@ extern uint16_t blinds_endpoint_id;
 
 #define direction_up 1
 #define direction_down 0
+
+
+void update_position_attribute(uint16_t endpoint_id, uint16_t new_position) {
+    //using namespace chip::app::Clusters::WindowCovering;
+    using namespace chip::app::Clusters::WindowCovering;
+
+    esp_matter_attr_val_t attr_val;
+    attr_val.type = ESP_MATTER_VAL_TYPE_UINT16;  // Set the value type
+    attr_val.val.u16 = new_position;             // Store the new position
+
+    esp_matter::attribute::update(
+        endpoint_id,
+        WindowCovering::Id,  // Pass the cluster ID (Window Covering cluster)
+        Attributes::CurrentPositionLiftPercent100ths::Id,  // Attribute ID
+        &attr_val  // Pass the struct instead of a raw pointer
+    );
+    //esp_matter::attribute::update(endpoint_id, WindowCovering::Attributes::CurrentPositionLiftPercent100ths::Id, &new_position, sizeof(new_position));
+}
 
 
 class BlindDriver {
@@ -68,7 +93,7 @@ private:
 public:
     BlindDriver();
     void calibrate();
-    void move_to_percent(uint16_t target_percent);
+    void move_to_percent(uint16_t endpoint_id, uint16_t target_percent);
     uint16_t get_current_percent();
     void init();
 };
@@ -200,7 +225,7 @@ void BlindDriver::calibrate() {
 }
 
 // --- Move to Target Position Function ---
-void BlindDriver::move_to_percent(uint16_t target_percent) {
+void BlindDriver::move_to_percent(uint16_t endpoint_id, uint16_t target_percent) {
     if (!is_calibrated) {
         ESP_LOGW(TAG, "Cannot move to target, motor not calibrated.");
         return;
@@ -216,6 +241,8 @@ void BlindDriver::move_to_percent(uint16_t target_percent) {
 
     if (abs_steps_to_move > 0) {
         step_motor(direction, abs_steps_to_move, DEFAULT_STEP_DELAY_US);
+        // ELIA: attempt to fix the homekit visualization
+        update_position_attribute(endpoint_id, target_percent);
     } else {
         ESP_LOGI(TAG, "Target position is the same as current position.");
     }
@@ -240,8 +267,8 @@ void blind_driver_calibrate() {
     blind_driver.calibrate();
 }
 
-void blind_driver_move_to_percent(uint16_t target_percent) {
-    blind_driver.move_to_percent(target_percent);
+void blind_driver_move_to_percent(uint16_t endpoint_id, uint16_t target_percent) {
+    blind_driver.move_to_percent(endpoint_id, target_percent);
 }
 
 uint16_t blind_driver_get_current_percent() {
@@ -305,33 +332,32 @@ esp_err_t app_driver_attribute_update(app_driver_handle_t driver_handle, uint16_
     esp_err_t err = ESP_OK;
     if (endpoint_id == blinds_endpoint_id) {
         ESP_LOGI(TAG, "8===============================D Received endpoint message");
-        led_indicator_handle_t handle = (led_indicator_handle_t)driver_handle;
         if (cluster_id == WindowCovering::Id) {
             ESP_LOGI(TAG, "8===============================D Received cluster message");
-            if (attribute_id == WindowCovering::Attributes::CurrentPositionLift::Id) {
-                // Set the blinds position based on the attribute value
-                // err = app_driver_blinds_set_position(handle, val);
-                ESP_LOGI("CurrentPosition", "Received attribute update: endpoint_id = %d, cluster_id = %lu, attribute_id = %lu", endpoint_id, cluster_id, attribute_id);
-            } else if (attribute_id == WindowCovering::Attributes::CurrentPositionLiftPercentage::Id) {
-                // Set the target position for the blinds
-                // err = app_driver_blinds_set_target_position(handle, val);
-                ESP_LOGI("CurrentPositionLiftPercentage", "Received attribute update: endpoint_id = %d, cluster_id = %lu, attribute_id = %lu", endpoint_id, cluster_id, attribute_id);
-            } else if (attribute_id == WindowCovering::Attributes::TargetPositionLiftPercent100ths::Id) {
+            if (attribute_id == WindowCovering::Attributes::TargetPositionLiftPercent100ths::Id) {
                 // Adjust the lift percentage if needed
-                // err = app_driver_blinds_set_lift_percentage(handle, val);
                 ESP_LOGI(TAG, "8===============================D Received attribute update: TargetPositionLiftPercent100ths");
                 uint16_t target_percent;
                 // Access the uint16_t value from the esp_matter_attr_val_t structure
-
                 target_percent = val->val.u16;
-                blind_driver_move_to_percent(target_percent); // Corrected call
+                blind_driver_move_to_percent(endpoint_id, target_percent); // Corrected call
                 //blind_driver_calibrate();
-
-            } else if (attribute_id == WindowCovering::Attributes::CurrentPositionLiftPercent100ths::Id) {
-                // Set the target lift percentage
-                // err = app_driver_blinds_set_target_lift_percentage(handle, val);
-                ESP_LOGI("CurrentPositionLiftPercent100ths", "Received attribute update: endpoint_id = %d, cluster_id = %lu, attribute_id = %lu", endpoint_id, cluster_id, attribute_id);
-            }
+            } 
+        }
+    }
+    else if (endpoint_id == blinds_top_endpoint_id){
+        ESP_LOGI(TAG, "TOP!!  8===============================D Received endpoint message");
+        if (cluster_id == WindowCovering::Id) {
+            ESP_LOGI(TAG, "TOP!!  8===============================D Received cluster message");
+            if (attribute_id == WindowCovering::Attributes::TargetPositionLiftPercent100ths::Id) {
+                // Adjust the lift percentage if needed
+                ESP_LOGI(TAG, "TOP!!  8===============================D Received attribute update: TargetPositionLiftPercent100ths");
+                uint16_t target_percent;
+                // Access the uint16_t value from the esp_matter_attr_val_t structure
+                target_percent = val->val.u16;
+                //blind_driver_move_to_percent(target_percent); // Corrected call
+                //blind_driver_calibrate();
+            } 
         }
     }
     return err;

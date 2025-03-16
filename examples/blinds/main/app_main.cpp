@@ -30,6 +30,7 @@
 
 static const char *TAG = "app_main";
 uint16_t blinds_endpoint_id = 0;
+uint16_t blinds_top_endpoint_id = 0;
 
 using namespace esp_matter;
 using namespace esp_matter::attribute;
@@ -150,39 +151,60 @@ static esp_err_t app_attribute_update_cb(attribute::callback_type_t type, uint16
 
 extern "C" void app_main()
 {
-    esp_err_t err = ESP_OK;
+    //esp_err_t err = ESP_OK;
 
     /* Initialize the ESP NVS layer */
     nvs_flash_init();
 
-esp_matter::node::config_t node_config;
-esp_matter::node_t *node = esp_matter::node::create(&node_config, app_attribute_update_cb, NULL);
-esp_matter::endpoint::window_covering_device::config_t window_config;
-esp_matter::endpoint_t *endpoint = esp_matter::endpoint::window_covering_device::create(node, &window_config, esp_matter::endpoint_flags::ENDPOINT_FLAG_NONE, NULL);
-blinds_endpoint_id = endpoint::get_id(endpoint);
-ESP_LOGI(TAG, "Blinds created with endpoint_id %d", blinds_endpoint_id);
+    esp_matter::node::config_t node_config;
+    esp_matter::node_t *node = esp_matter::node::create(&node_config, app_attribute_update_cb, NULL);
 
-esp_matter::cluster_t *cluster = esp_matter::cluster::get(endpoint, chip::app::Clusters::WindowCovering::Id);
-esp_matter::cluster::window_covering::feature::lift::config_t lift;
-esp_matter::cluster::window_covering::feature::position_aware_lift::config_t position_aware_lift;
+    // --- Endpoint for Bottom Blinds ---
+    esp_matter::endpoint::window_covering_device::config_t bottom_window_config;
+    esp_matter::endpoint_t *bottom_endpoint = esp_matter::endpoint::window_covering_device::create(node, &bottom_window_config, esp_matter::endpoint_flags::ENDPOINT_FLAG_NONE, NULL);
+    blinds_endpoint_id = esp_matter::endpoint::get_id(bottom_endpoint);
+    ESP_LOGI(TAG, "Bottom Blinds created with endpoint_id %d", blinds_endpoint_id);
 
-nullable<uint8_t> percentage = nullable<uint8_t>(0);
-nullable<uint16_t> percentage_100ths = nullable<uint16_t>(0);
-position_aware_lift.current_position_lift_percentage = percentage;
-position_aware_lift.target_position_lift_percent_100ths = percentage_100ths;
-position_aware_lift.current_position_lift_percent_100ths = percentage_100ths;
+    esp_matter::cluster_t *bottom_cluster = esp_matter::cluster::get(bottom_endpoint, chip::app::Clusters::WindowCovering::Id);
+    esp_matter::cluster::window_covering::feature::lift::config_t bottom_lift;
+    esp_matter::cluster::window_covering::feature::position_aware_lift::config_t bottom_position_aware_lift;
+    nullable<uint8_t> bottom_percentage = nullable<uint8_t>(0);
+    nullable<uint16_t> bottom_percentage_100ths = nullable<uint16_t>(0);
+    bottom_position_aware_lift.current_position_lift_percentage = bottom_percentage;
+    bottom_position_aware_lift.target_position_lift_percent_100ths = bottom_percentage_100ths;
+    bottom_position_aware_lift.current_position_lift_percent_100ths = bottom_percentage_100ths;
+    esp_matter::cluster::window_covering::feature::absolute_position::config_t bottom_absolute_position;
+    esp_matter::cluster::window_covering::feature::lift::add(bottom_cluster, &bottom_lift);
+    esp_matter::cluster::window_covering::feature::position_aware_lift::add(bottom_cluster, &bottom_position_aware_lift);
+    esp_matter::cluster::window_covering::feature::absolute_position::add(bottom_cluster, &bottom_absolute_position);
 
-esp_matter::cluster::window_covering::feature::absolute_position::config_t absolute_position;
-esp_matter::cluster::window_covering::feature::lift::add(cluster, &lift);
-esp_matter::cluster::window_covering::feature::position_aware_lift::add(cluster, &position_aware_lift);
-esp_matter::cluster::window_covering::feature::absolute_position::add(cluster, &absolute_position);
+    // --- Endpoint for Top Lift ---
+    esp_matter::endpoint::window_covering_device::config_t top_window_config;
+    esp_matter::endpoint_t *top_endpoint = esp_matter::endpoint::window_covering_device::create(node, &top_window_config, esp_matter::endpoint_flags::ENDPOINT_FLAG_NONE, NULL);
+    blinds_top_endpoint_id = esp_matter::endpoint::get_id(top_endpoint);
+    ESP_LOGI(TAG, "Top Lift created with endpoint_id %d", blinds_top_endpoint_id);
 
-// add diagnostic logs cluster on root endpoint
-esp_matter::cluster::diagnostic_logs::config_t diag_logs_config;
-esp_matter::endpoint_t *root_ep = endpoint::get(node, 0); // get the root node ep
-esp_matter::cluster::diagnostic_logs::create(root_ep, &diag_logs_config, CLUSTER_FLAG_SERVER);
+    esp_matter::cluster_t *top_cluster = esp_matter::cluster::get(top_endpoint, chip::app::Clusters::WindowCovering::Id);
+    esp_matter::cluster::window_covering::feature::lift::config_t blinds_top;
+    esp_matter::cluster::window_covering::feature::position_aware_lift::config_t top_position_aware_lift;
+    nullable<uint8_t> top_percentage = nullable<uint8_t>(0);
+    nullable<uint16_t> top_percentage_100ths = nullable<uint16_t>(0);
+    top_position_aware_lift.current_position_lift_percentage = top_percentage;
+    top_position_aware_lift.target_position_lift_percent_100ths = top_percentage_100ths;
+    top_position_aware_lift.current_position_lift_percent_100ths = top_percentage_100ths;
+    esp_matter::cluster::window_covering::feature::absolute_position::config_t top_absolute_position;
+    esp_matter::cluster::window_covering::feature::lift::add(top_cluster, &blinds_top);
+    esp_matter::cluster::window_covering::feature::position_aware_lift::add(top_cluster, &top_position_aware_lift);
+    esp_matter::cluster::window_covering::feature::absolute_position::add(top_cluster, &top_absolute_position);
 
-esp_matter::start(app_event_cb);
-app_driver_blinds_init(blinds_endpoint_id);
+    // add diagnostic logs cluster on root endpoint
+    esp_matter::cluster::diagnostic_logs::config_t diag_logs_config;
+    esp_matter::endpoint_t *root_ep = esp_matter::endpoint::get(node, 0); // get the root node ep
+    esp_matter::cluster::diagnostic_logs::create(root_ep, &diag_logs_config, CLUSTER_FLAG_SERVER);
+
+    esp_matter::start(app_event_cb);
+    app_driver_blinds_init(blinds_endpoint_id);
+    //app_driver_blinds_top_init(blinds_top_endpoint_id); // Initialize the driver for the top lift
+
 
 }
