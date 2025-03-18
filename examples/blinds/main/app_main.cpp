@@ -203,7 +203,11 @@ extern "C" void app_main()
     esp_matter::cluster::diagnostic_logs::create(root_ep, &diag_logs_config, CLUSTER_FLAG_SERVER);
 
     esp_matter::start(app_event_cb);
-    app_driver_blinds_init(blinds_endpoint_id);
+
+    vTaskDelay(pdMS_TO_TICKS(5000)); // Wait a bit
+    
+    app_driver_blinds_init();
+
     //app_driver_blinds_top_init(blinds_top_endpoint_id); // Initialize the driver for the top lift
 
 

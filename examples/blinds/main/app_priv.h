@@ -79,4 +79,4 @@ esp_err_t app_driver_attribute_update(app_driver_handle_t driver_handle, uint16_
  * @return ESP_OK on success.
  * @return error in case of failure.
  */
-esp_err_t app_driver_blinds_init(uint16_t endpoint_id);
+esp_err_t app_driver_blinds_init();
