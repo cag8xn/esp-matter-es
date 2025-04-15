@@ -41,16 +41,9 @@ extern uint16_t blinds_top_endpoint_id;
 bool busy = false;
 
 // --- Configuration ---
-#define STEP_PIN_1 GPIO_NUM_18
-#define DIR_PIN_1 GPIO_NUM_19
-#define ENABLE_PIN_1 GPIO_NUM_5 // Optional, active low
 
-#define STEP_PIN_TOP_1 GPIO_NUM_21
-#define DIR_PIN_TOP_1 GPIO_NUM_22
-#define ENABLE_PIN_TOP_1 GPIO_NUM_35 // Optional, active low
-
-#define TOP_LIMIT_SWITCH_PIN GPIO_NUM_25
-#define BOTTOM_LIMIT_SWITCH_PIN GPIO_NUM_26
+#define TOP_LIMIT_SWITCH_PIN GPIO_NUM_16
+#define BOTTOM_LIMIT_SWITCH_PIN GPIO_NUM_17
 
 #define STEPS_PER_REVOLUTION 200 // Adjust based on your motor
 #define MICROSTEPPING 1        // Adjust based on your DRV8825 settings
@@ -355,8 +348,8 @@ void calibration_task(void* param) {
 
 void movement_task(void* param) {
     while (busy == true) {
-        ESP_LOGI(TAG, "A driver is busy. Waiting 1s...");
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        ESP_LOGI(TAG, "A driver is busy. Waiting 200ms...");
+        vTaskDelay(pdMS_TO_TICKS(200));
     }
     ESP_LOGI(TAG, "8====================================================D DRIVER BUSY!!!!!!");
     busy = true;
@@ -403,14 +396,14 @@ esp_err_t app_driver_attribute_update(app_driver_handle_t driver_handle, uint16_
 esp_err_t app_driver_blinds_init() {
 
     // Initialize the members of the object
-    bottomConfig1.step_pin = GPIO_NUM_13;   // Example GPIO for STEP
+    bottomConfig1.step_pin = GPIO_NUM_12;   // Example GPIO for STEP
     bottomConfig1.dir_pin = GPIO_NUM_14;    // Example GPIO for DIR
-    bottomConfig1.enable_pin = GPIO_NUM_12;  // Example GPIO for ENABLE
+    bottomConfig1.enable_pin = GPIO_NUM_13;  // Example GPIO for ENABLE
 
     // You can also create another StepperConfig object for the top lift
-    topConfig1.step_pin = GPIO_NUM_18;
-    topConfig1.dir_pin = GPIO_NUM_19;
-    topConfig1.enable_pin = GPIO_NUM_5;
+    topConfig1.step_pin = GPIO_NUM_26;
+    topConfig1.dir_pin = GPIO_NUM_25;
+    topConfig1.enable_pin = GPIO_NUM_27;
 
 
     ESP_LOGI(TAG, "Bottom Blind 1 STEP Pin: %d", bottomConfig1.step_pin);

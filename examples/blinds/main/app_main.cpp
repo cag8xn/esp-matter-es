@@ -204,7 +204,7 @@ extern "C" void app_main()
 
     esp_matter::start(app_event_cb);
 
-    vTaskDelay(pdMS_TO_TICKS(5000)); // Wait a bit
+    vTaskDelay(pdMS_TO_TICKS(4000)); // Wait a bit
     
     app_driver_blinds_init();
 
