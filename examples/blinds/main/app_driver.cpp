@@ -38,7 +38,8 @@ using namespace esp_matter::cluster;
 static const char *TAG = "app_driver";
 extern uint16_t blinds_endpoint_id;
 extern uint16_t blinds_top_endpoint_id;
-bool busy = false;
+uint16_t busy_endpoint = 777;
+bool requested = false;
 
 // --- Configuration ---
 
@@ -55,42 +56,42 @@ bool busy = false;
 
 class StepperConfig {
 public:
-    gpio_num_t enable_pin;
-    gpio_num_t dir_pin;
-    gpio_num_t step_pin;
+    gpio_num_t top_enable_pin;
+    gpio_num_t top_dir_pin;
+    gpio_num_t top_step_pin;
+    volatile int top_current_position_steps = 0;
+    uint16_t top_endpoint;
+    gpio_num_t bot_enable_pin;
+    gpio_num_t bot_dir_pin;
+    gpio_num_t bot_step_pin;
+    int max_steps = 0;  // ELIA: assuming the travel distance is the same for the top and bottom blinds
+    volatile int bot_current_position_steps = 0;
+    uint16_t bot_endpoint;
+
     bool is_calibrated = false;
-    int max_steps = 0;
-    volatile int current_position_steps = 0;
-    uint16_t endpoint;
 };
 
-StepperConfig bottomConfig1;
-StepperConfig topConfig1;
-
-struct CalibrationParams {
-    StepperConfig* bottom_stepper;
-    StepperConfig* top_stepper;
-};
+StepperConfig Config;
 
 struct MovementParams {
-    StepperConfig* any_stepper;
+    bool bottom;
     u_int16_t position_percent;
 };
 
 
 class BlindDriver {
 private:
-    void step_motor(StepperConfig& stepper, bool direction, int steps, int delay_us);
+    void step_motor(bool bottom, bool direction, int steps, int delay_us);
     bool is_top_limit_reached();
     bool is_bottom_limit_reached();
-    int percent_to_steps(StepperConfig& stepper, uint16_t percent);
-    uint16_t steps_to_percent(StepperConfig& stepper, int steps);
+    int percent_to_steps(bool bottom, uint16_t percent);
+    uint16_t steps_to_percent(int steps);
 
 public:
     BlindDriver();
-    void calibrate(StepperConfig& stepper1bot, StepperConfig& stepper1top);
-    void move_to_percent(StepperConfig& stepper, uint16_t target_percent);
-    uint16_t get_current_percent(StepperConfig& stepper);
+    void calibrate();
+    void move_to_percent(bool bottom, uint16_t target_percent);
+    uint16_t get_current_percent(bool bottom);
     void init();
 };
 
@@ -107,189 +108,239 @@ bool BlindDriver::is_bottom_limit_reached() {
 }
 
 // --- Stepper Motor Control ---
-void BlindDriver::step_motor(StepperConfig& stepper, bool direction, int steps, int delay_us) {
-    if (!(stepper.is_calibrated)) {
-        ESP_LOGW(TAG, "Motor not calibrated, cannot move.");
+void BlindDriver::step_motor(bool bottom, bool direction, int steps, int delay_us) {
+    if (!(Config.is_calibrated)) {
+        ESP_LOGW(TAG, "System not calibrated, cannot move.");
         return;
     }
-
-    gpio_set_level(stepper.enable_pin, 0); // Enable the motor
-    gpio_set_level(stepper.dir_pin, direction);
-
     int steps_moved = 0;
+    gpio_num_t step_pin = Config.top_step_pin;
+    gpio_num_t enable_pin = Config.top_enable_pin;
+
+    if (bottom) {
+        step_pin = Config.bot_step_pin;
+        enable_pin = Config.bot_enable_pin;
+        gpio_set_level(Config.bot_dir_pin, direction);
+    }
+    else {
+        step_pin = Config.top_step_pin;
+        enable_pin = Config.top_enable_pin;
+        gpio_set_level(Config.top_dir_pin, direction);
+    }
+
+    gpio_set_level(enable_pin, 0); // Enable the motor
     while (steps_moved < steps) {
         // Safety check for limit switches
-        if (is_top_limit_reached() || is_bottom_limit_reached()) {
+        if ((direction && is_bottom_limit_reached()) || (!(direction) && is_top_limit_reached())) {
             ESP_LOGW(TAG, "Limit switch triggered, stopping movement.");
             break;
         }
-
-        gpio_set_level(stepper.step_pin, 1);
+        gpio_set_level(step_pin, 1);
         usleep(delay_us);
-        gpio_set_level(stepper.step_pin, 0);
+        gpio_set_level(step_pin, 0);
         usleep(delay_us);
 
         steps_moved++;
 
         if (steps_moved % 50 == 0) {
             vTaskDelay(pdMS_TO_TICKS(5)); // Micro pause (1 tick = typically 1ms)
+            if (requested) {
+                ESP_LOGW(TAG, "Another command was received. Current task will be terminated.");
+                break;
+            }
         }
-
         if (direction) {
-            stepper.current_position_steps++;
-        } else {
-            stepper.current_position_steps--;
+            if (bottom) {
+                Config.bot_current_position_steps--;
+            }
+            else {
+                Config.top_current_position_steps--;
+                if (Config.top_current_position_steps <= Config.bot_current_position_steps) {
+                    break;
+                }
+            }
+        }
+        else {
+            if (bottom) {
+                Config.bot_current_position_steps++;
+            }
+            else {
+                Config.top_current_position_steps++;
+            }
         }
     }
-
-    gpio_set_level(stepper.enable_pin, 1); // Disable the motor
-    ESP_LOGI(TAG, "Moved %d steps in direction %d. Current position: %d", steps_moved, direction, stepper.current_position_steps);
+    
+    gpio_set_level(enable_pin, 1); // Disable the motor
+    ESP_LOGI(TAG, "Stepper %d Moved %d steps in direction %d. Current positions: top %d - bottom %d", bottom, steps_moved, direction, Config.top_current_position_steps, Config.bot_current_position_steps);
 }
 
 // --- Position Conversion ---
-int BlindDriver::percent_to_steps(StepperConfig& stepper, uint16_t percent) {
-    if (!(stepper.is_calibrated) || stepper.max_steps == 0) {
+int BlindDriver::percent_to_steps(bool bottom, uint16_t percent) {
+    if (!(Config.is_calibrated) || Config.max_steps == 0) {
         ESP_LOGW(TAG, "Cannot convert percentage to steps, motor not calibrated.");
-        return stepper.current_position_steps; // Return current position if not calibrated
+        if (bottom) {
+            return Config.bot_current_position_steps; // Return current position if not calibrated
+        }
+        else {
+            return Config.top_current_position_steps; // Return current position if not calibrated
+        }
     }
-    return static_cast<int>(std::round(static_cast<double>(percent) * stepper.max_steps / 10000.0));
+    return static_cast<int>(std::round(static_cast<double>(percent) * Config.max_steps / 10000.0));
 }
 
-uint16_t BlindDriver::steps_to_percent(StepperConfig& stepper, int steps) {
-    if (!(stepper.is_calibrated) || stepper.max_steps == 0) {
+uint16_t BlindDriver::steps_to_percent(int steps) {
+    if (!(Config.is_calibrated) || Config.max_steps == 0) {
         ESP_LOGW(TAG, "Cannot convert steps to percentage, motor not calibrated.");
         return 0;
     }
-    return static_cast<uint16_t>(std::round(static_cast<double>(steps) * 10000.0 / stepper.max_steps));
+    return static_cast<uint16_t>(std::round(static_cast<double>(steps) * 10000.0 / Config.max_steps));
 }
 
 // --- Calibration Function ---
-void BlindDriver::calibrate(StepperConfig& stepper1bot, StepperConfig& stepper1top) {
+void BlindDriver::calibrate() {
     ESP_LOGI(TAG, "Starting blind calibration...");
 
     // Move down until bottom limit is reached
-    ESP_LOGI(TAG, "Moving up to find top limit...");
-    gpio_set_level(stepper1bot.enable_pin, 0);
-    gpio_set_level(stepper1bot.dir_pin, direction_up); // Set direction down
+    ESP_LOGI(TAG, "Moving bottom stepper up to find top limit...");
+    gpio_set_level(Config.bot_enable_pin, 0);
+    gpio_set_level(Config.bot_dir_pin, direction_up); // Set direction down
     int useless_steps = 0;
     while (!is_top_limit_reached()) {
-        gpio_set_level(stepper1bot.step_pin, 1);
+        gpio_set_level(Config.bot_step_pin, 1);
         usleep(DEFAULT_STEP_DELAY_US);
-        gpio_set_level(stepper1bot.step_pin, 0);
+        gpio_set_level(Config.bot_step_pin, 0);
         usleep(DEFAULT_STEP_DELAY_US);
         useless_steps++;
         if (useless_steps % 50 == 0) {
             vTaskDelay(pdMS_TO_TICKS(5)); // Micro pause (1 tick = typically 1ms)
         }
     }
-    gpio_set_level(stepper1bot.enable_pin, 1);
-    //stepper1bot.current_position_steps = 0; // Reset position to 0 at bottom limit
-    ESP_LOGI(TAG, "Stepper 1 top limit reached.");
+    gpio_set_level(Config.bot_enable_pin, 1);
+    //Config.bot_current_position_steps = 0; // Reset position to 0 at bottom limit
+    ESP_LOGI(TAG, "Bottom stepper top limit reached.");
     vTaskDelay(pdMS_TO_TICKS(1000)); // Wait a bit
 
-    // Move up until top limit is reached
-    ESP_LOGI(TAG, "Moving down to find bottom limit...");
-    gpio_set_level(stepper1bot.enable_pin, 0);
-    gpio_set_level(stepper1bot.dir_pin, direction_down); // Set direction down
+    ESP_LOGI(TAG, "Moving bottom stepper down to find bottom limit...");
+    gpio_set_level(Config.bot_enable_pin, 0);
+    gpio_set_level(Config.bot_dir_pin, direction_down); // Set direction down
     int steps_counted = 0;
     while (!is_bottom_limit_reached()) {
-        gpio_set_level(stepper1bot.step_pin, 1);
+        gpio_set_level(Config.bot_step_pin, 1);
         usleep(DEFAULT_STEP_DELAY_US);
-        gpio_set_level(stepper1bot.step_pin, 0);
+        gpio_set_level(Config.bot_step_pin, 0);
         usleep(DEFAULT_STEP_DELAY_US);
         steps_counted++;
         if (steps_counted % 50 == 0) {
             vTaskDelay(pdMS_TO_TICKS(5)); // Micro pause (1 tick = typically 1ms)
         }
     }
-    gpio_set_level(stepper1bot.enable_pin, 1);
-    stepper1bot.max_steps = steps_counted;
-    stepper1bot.current_position_steps = 0; // Reset position to 0 at bottom limit
-    stepper1bot.is_calibrated = true;
-    ESP_LOGI(TAG, "Bottom limit reached. Max steps: %d", stepper1bot.max_steps);
+    gpio_set_level(Config.bot_enable_pin, 1);
+    Config.max_steps = steps_counted;
+    // Config.bot_current_position_steps = 0; // Reset position to 0 at bottom limit
+    Config.bot_current_position_steps = steps_counted; // Reset position to 0 at bottom limit
+
+    ESP_LOGI(TAG, "Bottom stepper bottom limit reached. Max steps: %d", Config.max_steps);
     vTaskDelay(pdMS_TO_TICKS(1000)); // Wait a bit
 
-    ESP_LOGI(TAG, "Moving the top up to find top limit...");
-    gpio_set_level(stepper1top.enable_pin, 0);
-    gpio_set_level(stepper1top.dir_pin, direction_up); // Set direction down
+    ESP_LOGI(TAG, "Moving the top stepper up to find top limit...");
+    gpio_set_level(Config.top_enable_pin, 0);
+    gpio_set_level(Config.top_dir_pin, direction_up); // Set direction down
     useless_steps = 0;
     while (!is_top_limit_reached()) {
-        gpio_set_level(stepper1top.step_pin, 1);
+        gpio_set_level(Config.top_step_pin, 1);
         usleep(DEFAULT_STEP_DELAY_US);
-        gpio_set_level(stepper1top.step_pin, 0);
+        gpio_set_level(Config.top_step_pin, 0);
         usleep(DEFAULT_STEP_DELAY_US);
         useless_steps++;
         if (useless_steps % 50 == 0) {
             vTaskDelay(pdMS_TO_TICKS(5)); // Micro pause (1 tick = typically 1ms)
         }
     }
-    gpio_set_level(stepper1top.enable_pin, 1);
-    //stepper1bot.current_position_steps = 0; // Reset position to 0 at bottom limit
-    ESP_LOGI(TAG, "Stepper 1 top limit reached.");
-    stepper1top.max_steps = stepper1bot.max_steps; // ELIA: assuming the travel distance is the same for the top and bottom blinds
-    stepper1top.current_position_steps = stepper1top.max_steps;
-    stepper1top.is_calibrated = true;
+    gpio_set_level(Config.top_enable_pin, 1);
+    ESP_LOGI(TAG, "Top stepper top limit reached.");
+
+    //Config.top_current_position_steps = Config.max_steps;
+    Config.top_current_position_steps = 0;
+    Config.is_calibrated = true;
 }
 
 // --- Move to Target Position Function ---
-void BlindDriver::move_to_percent(StepperConfig& stepper, uint16_t target_percent) {
-    if (!(stepper.is_calibrated)) {
+void BlindDriver::move_to_percent(bool bottom, uint16_t target_percent) {
+    if (!(Config.is_calibrated)) {
         ESP_LOGW(TAG, "Cannot move to target, motor not calibrated.");
         return;
     }
 
-    int target_steps = percent_to_steps(stepper, target_percent);
-    ESP_LOGI(TAG, "Moving to target percentage: %d (steps: %d). Current position: %d",
-             target_percent, target_steps, stepper.current_position_steps);
-
-    int steps_to_move = target_steps - stepper.current_position_steps;
-    bool direction = (steps_to_move > 0);
+    int target_steps = percent_to_steps(bottom, target_percent);
+    ESP_LOGI(TAG, "---------- Moving stepper %d to target percentage: %d (steps: %d). Current position: top %d - bottom %d",
+             bottom, target_percent, target_steps, Config.top_current_position_steps, Config.bot_current_position_steps);
+    int steps_to_move = 0;
+    if (bottom) {
+        steps_to_move = target_steps - Config.bot_current_position_steps;
+    }
+    else {
+        steps_to_move = target_steps - Config.top_current_position_steps;
+    }
+    bool direction = (steps_to_move < 0);
     int abs_steps_to_move = std::abs(steps_to_move);
 
     if (abs_steps_to_move > 0) {
-        step_motor(stepper, direction, abs_steps_to_move, DEFAULT_STEP_DELAY_US);
+        step_motor(bottom, direction, abs_steps_to_move, DEFAULT_STEP_DELAY_US);
     } else {
         ESP_LOGI(TAG, "Target position is the same as current position.");
     }
+    ESP_LOGI(TAG, "---------- Moved stepper %d to target percentage: %d (steps: %d). Current position: top %d - bottom %d",
+        bottom, target_percent, target_steps, Config.top_current_position_steps, Config.bot_current_position_steps);
 }
 
 // --- Get Current Position ---
-uint16_t BlindDriver::get_current_percent(StepperConfig& stepper) {
-    return steps_to_percent(stepper, stepper.current_position_steps);
+uint16_t BlindDriver::get_current_percent(bool bottom) {
+    if (bottom) {
+        return steps_to_percent(Config.bot_current_position_steps);
+    }
+    else {
+        return steps_to_percent(Config.top_current_position_steps);
+    }
 }
 
 // --- Global Instance of the Driver ---
 static BlindDriver blind_driver;
 
-uint16_t blind_driver_get_current_percent(StepperConfig& stepper) {
-    return blind_driver.get_current_percent(stepper);
+uint16_t blind_driver_get_current_percent(bool bottom) {
+    return blind_driver.get_current_percent(bottom);
 }
 
-void update_position_attribute(StepperConfig& stepper) {
+void update_position_attribute(bool bottom) {
     //using namespace chip::app::Clusters::WindowCovering;
     using namespace chip::app::Clusters::WindowCovering;
 
     esp_matter_attr_val_t attr_val;
     attr_val.type = ESP_MATTER_VAL_TYPE_UINT16;  // Set the value type
-    attr_val.val.u16 = blind_driver_get_current_percent(stepper);             // Store the new position
-
+    attr_val.val.u16 = blind_driver_get_current_percent(bottom);             // Store the new position
+    uint16_t endpoint = 0;
+    if (bottom) {
+        endpoint = Config.bot_endpoint;
+    }
+    else {
+        endpoint = Config.top_endpoint;
+    }
     esp_matter::attribute::update(
-        stepper.endpoint,
+        endpoint,
         WindowCovering::Id,  // Pass the cluster ID (Window Covering cluster)
         Attributes::CurrentPositionLiftPercent100ths::Id,  // Attribute ID
         &attr_val  // Pass the struct instead of a raw pointer
     );
 }
 
-void blind_driver_calibrate(StepperConfig& stepper1bot, StepperConfig& stepper1top) {
-    blind_driver.calibrate(stepper1bot, stepper1top);
-    update_position_attribute(stepper1bot);
-    update_position_attribute(stepper1top);
+void blind_driver_calibrate() {
+    blind_driver.calibrate();
+    update_position_attribute(true);
+    update_position_attribute(false);
 }
 
-void blind_driver_move_to_percent(StepperConfig& stepper, uint16_t target_percent) {
-    blind_driver.move_to_percent(stepper, target_percent);
-    update_position_attribute(stepper);
+void blind_driver_move_to_percent(bool bottom, uint16_t target_percent) {
+    blind_driver.move_to_percent(bottom, target_percent);
+    update_position_attribute(bottom);
 }
 
 
@@ -339,27 +390,42 @@ static void app_driver_button_toggle_cb(void *arg, void *data)
 
 
 void calibration_task(void* param) {
-    CalibrationParams* params = (CalibrationParams*) param;
+    //CalibrationParams* params = (CalibrationParams*) param;
     // Call the calibration function with both steppers
-    blind_driver_calibrate(*params->bottom_stepper, *params->top_stepper);
+    blind_driver_calibrate();
+    //free(params);  // Clean up memory
+    vTaskDelete(NULL); // End the task
+}
+
+
+void movement_task(void* param) {
+    MovementParams* p = static_cast<MovementParams*>(param);
+    while (busy_endpoint != 777) {
+        if ((p->bottom && (busy_endpoint == blinds_endpoint_id)) || (!(p->bottom) && (busy_endpoint == blinds_top_endpoint_id))) {
+            if (!(requested)) {
+                requested = true;
+            }
+        }
+        ESP_LOGI(TAG, "A driver is busy. Waiting 200ms...");
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+    ESP_LOGI(TAG, "8====================================================D DRIVER GOT BUSY!!!!!!");
+    requested = false;
+    if (p->bottom) {
+        busy_endpoint = blinds_endpoint_id;
+    }
+    else {
+        busy_endpoint = blinds_top_endpoint_id;
+    }
+    MovementParams* params = (MovementParams*) param;
+    blind_driver_move_to_percent(params->bottom, params->position_percent);
+    busy_endpoint = 777;
+    ESP_LOGI(TAG, "8====================================================D DRIVER GOT RELEASED!!!!!!");
     free(params);  // Clean up memory
     vTaskDelete(NULL); // End the task
 }
 
-void movement_task(void* param) {
-    while (busy == true) {
-        ESP_LOGI(TAG, "A driver is busy. Waiting 200ms...");
-        vTaskDelay(pdMS_TO_TICKS(200));
-    }
-    ESP_LOGI(TAG, "8====================================================D DRIVER BUSY!!!!!!");
-    busy = true;
-    MovementParams* params = (MovementParams*) param;
-    blind_driver_move_to_percent(*params->any_stepper, params->position_percent);
-    busy = false;
-    ESP_LOGI(TAG, "8====================================================D DRIVER RELEASED!!!!!!");
-    free(params);  // Clean up memory
-    vTaskDelete(NULL); // End the task
-}
+
 
 esp_err_t app_driver_attribute_update(app_driver_handle_t driver_handle, uint16_t endpoint_id, uint32_t cluster_id,
                                       uint32_t attribute_id, esp_matter_attr_val_t *val)
@@ -370,24 +436,25 @@ esp_err_t app_driver_attribute_update(app_driver_handle_t driver_handle, uint16_
 
     if (cluster_id == WindowCovering::Id) {
         if (attribute_id == WindowCovering::Attributes::TargetPositionLiftPercent100ths::Id) {
-            StepperConfig* stepper = nullptr;
+            bool bottom = true;
             if (endpoint_id == blinds_endpoint_id) {
-                stepper = &bottomConfig1;
+                bottom = true;
             }
             else if (endpoint_id == blinds_top_endpoint_id) {
-                stepper = &topConfig1;
+                bottom = false;
             }
             // Adjust the lift percentage if needed
-            ESP_LOGI(TAG, "8===============================D Received attribute update: TargetPositionLiftPercent100ths");
             uint16_t target_percent;
             // Access the uint16_t value from the esp_matter_attr_val_t structure
             target_percent = val->val.u16;
-            //blind_driver_move_to_percent(*stepper, target_percent);
+            //test_movement_task(bottom, target_percent);
+            ESP_LOGI(TAG, "8===============================D Received attribute update: TargetPositionLiftPercent100ths - target_percent: %d", target_percent);
             
             MovementParams* params = (MovementParams*) malloc(sizeof(MovementParams));
-            params->any_stepper = stepper;
+            params->bottom = bottom;
             params->position_percent = target_percent;
-            xTaskCreate(&movement_task, "movement_task", 4096, params, 5, NULL);            
+            xTaskCreate(&movement_task, "movement_task", 4096, params, 5, NULL);
+                  
         }
     }
     return err;
@@ -396,37 +463,37 @@ esp_err_t app_driver_attribute_update(app_driver_handle_t driver_handle, uint16_
 esp_err_t app_driver_blinds_init() {
 
     // Initialize the members of the object
-    bottomConfig1.step_pin = GPIO_NUM_12;   // Example GPIO for STEP
-    bottomConfig1.dir_pin = GPIO_NUM_14;    // Example GPIO for DIR
-    bottomConfig1.enable_pin = GPIO_NUM_13;  // Example GPIO for ENABLE
+    Config.top_step_pin = GPIO_NUM_12;   // Example GPIO for STEP
+    Config.top_dir_pin = GPIO_NUM_14;    // Example GPIO for DIR
+    Config.top_enable_pin = GPIO_NUM_13;  // Example GPIO for ENABLE
 
     // You can also create another StepperConfig object for the top lift
-    topConfig1.step_pin = GPIO_NUM_26;
-    topConfig1.dir_pin = GPIO_NUM_25;
-    topConfig1.enable_pin = GPIO_NUM_27;
+    Config.bot_step_pin = GPIO_NUM_26;
+    Config.bot_dir_pin = GPIO_NUM_25;
+    Config.bot_enable_pin = GPIO_NUM_27;
 
 
-    ESP_LOGI(TAG, "Bottom Blind 1 STEP Pin: %d", bottomConfig1.step_pin);
-    ESP_LOGI(TAG, "Top Blind 1 STEP Pin: %d", topConfig1.step_pin);
+    ESP_LOGI(TAG, "Bottom Blind 1 STEP Pin: %d", Config.bot_step_pin);
+    ESP_LOGI(TAG, "Top Blind 1 STEP Pin: %d", Config.top_step_pin);
 
     gpio_config_t io_conf = {};
     io_conf.intr_type = GPIO_INTR_DISABLE;
     io_conf.mode = GPIO_MODE_OUTPUT;
     io_conf.pin_bit_mask = 
-        (1ULL << bottomConfig1.step_pin) | 
-        (1ULL << bottomConfig1.dir_pin) | 
-        (1ULL << bottomConfig1.enable_pin) | 
-        (1ULL << topConfig1.step_pin) |
-        (1ULL << topConfig1.dir_pin) |
-        (1ULL << topConfig1.enable_pin);
+        (1ULL << Config.bot_step_pin) | 
+        (1ULL << Config.bot_dir_pin) | 
+        (1ULL << Config.bot_enable_pin) | 
+        (1ULL << Config.top_step_pin) |
+        (1ULL << Config.top_dir_pin) |
+        (1ULL << Config.top_enable_pin);
     ESP_ERROR_CHECK(gpio_config(&io_conf));
 
-    gpio_set_level(bottomConfig1.step_pin, 0);
-    gpio_set_level(bottomConfig1.dir_pin, 0);
-    gpio_set_level(bottomConfig1.enable_pin, 1);
-    gpio_set_level(topConfig1.step_pin, 0);
-    gpio_set_level(topConfig1.dir_pin, 0);
-    gpio_set_level(topConfig1.enable_pin, 1);
+    gpio_set_level(Config.bot_step_pin, 0);
+    gpio_set_level(Config.bot_dir_pin, 0);
+    gpio_set_level(Config.bot_enable_pin, 1);
+    gpio_set_level(Config.top_step_pin, 0);
+    gpio_set_level(Config.top_dir_pin, 0);
+    gpio_set_level(Config.top_enable_pin, 1);
 
     // Configure limit switch pins as inputs with pull-up
     gpio_config_t io_conf2 = {};
@@ -437,19 +504,20 @@ esp_err_t app_driver_blinds_init() {
     ESP_ERROR_CHECK(gpio_config(&io_conf2));
 
     // Configure the correct endpoint_id for each stepper
-    bottomConfig1.endpoint = blinds_endpoint_id;
-    topConfig1.endpoint = blinds_top_endpoint_id;
+    Config.bot_endpoint = blinds_endpoint_id;
+    Config.top_endpoint = blinds_top_endpoint_id;
 
 
     ESP_LOGI(TAG, "8============D Hardware configuration complete!");
 
-    vTaskDelay(pdMS_TO_TICKS(2000));
-
-    CalibrationParams* params = (CalibrationParams*) malloc(sizeof(CalibrationParams));
-    params->bottom_stepper = &bottomConfig1;
-    params->top_stepper = &topConfig1;
-
-    xTaskCreate(&calibration_task, "calibration_task", 4096, params, 5, NULL);
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    
+    //CalibrationParams* params = (CalibrationParams*) malloc(sizeof(CalibrationParams));
+    //params->bottom_stepper = &bottomConfig1;
+    //params->top_stepper = &topConfig1;
+    xTaskCreate(&calibration_task, "calibration_task", 4096, NULL, 5, NULL);
+    
+    //blind_driver_calibrate();
     return ESP_OK;
 }
 
