@@ -178,6 +178,7 @@ extern "C" void app_main()
     esp_matter::cluster::window_covering::feature::position_aware_lift::add(bottom_cluster, &bottom_position_aware_lift);
     esp_matter::cluster::window_covering::feature::absolute_position::add(bottom_cluster, &bottom_absolute_position);
 
+    
     // --- Endpoint for Top Lift ---
     esp_matter::endpoint::window_covering_device::config_t top_window_config;
     esp_matter::endpoint_t *top_endpoint = esp_matter::endpoint::window_covering_device::create(node, &top_window_config, esp_matter::endpoint_flags::ENDPOINT_FLAG_NONE, NULL);
@@ -207,6 +208,8 @@ extern "C" void app_main()
     vTaskDelay(pdMS_TO_TICKS(1000)); // Wait a bit
     
     app_driver_blinds_init();
+    app_driver_handle_t button_handle = app_driver_button_init();
+    app_driver_handle_t button_reset_handle = app_driver_reset_button_init();
 
     //app_driver_blinds_top_init(blinds_top_endpoint_id); // Initialize the driver for the top lift
 
