@@ -48,7 +48,7 @@ bool requested = false;
 
 #define STEPS_PER_REVOLUTION 200 // Adjust based on your motor
 #define MICROSTEPPING 1        // Adjust based on your DRV8825 settings
-#define DEFAULT_STEP_DELAY_US 800 // Adjust for desired speed
+#define DEFAULT_STEP_DELAY_US 400 // Adjust for desired speed
 
 #define direction_up 1
 #define direction_down 0
@@ -157,7 +157,7 @@ void BlindDriver::step_motor(bool bottom, bool direction, int steps, int delay_u
         if ((!(direction) && is_bottom_limit_reached())) {
             ESP_LOGW(TAG, "Bottom limit switch triggered, reverting movement and stopping stepper.");
             gpio_set_level(dir_pin, !direction);
-            while (is_top_limit_reached()) {
+            while (is_bottom_limit_reached()) {
                 gpio_set_level(step_pin, 1);
                 usleep(delay_us);
                 gpio_set_level(step_pin, 0);
@@ -316,7 +316,7 @@ void BlindDriver::calibrate() {
     gpio_set_level(Config.top_enable_pin, 1);
     ESP_LOGI(TAG, "Top stepper top limit reached.");
 
-    //Config.top_current_position_steps = Config.max_steps;
+
     Config.top_current_position_steps = 0;
     Config.is_calibrated = true;
 
@@ -362,13 +362,11 @@ void BlindDriver::move_to_percent(bool bottom, uint16_t target_percent) {
             ESP_LOGI(TAG, "---------- Requested position mismatch. Top stepper needs to move first");
             int top_steps_to_move = Config.top_current_position_steps - target_steps;
             step_motor(false, direction_up, top_steps_to_move, DEFAULT_STEP_DELAY_US);
-            update_position_attribute(false);
         }
         else if (!(bottom) && target_steps > Config.bot_current_position_steps) {
             ESP_LOGI(TAG, "---------- Requested position mismatch. Bottom stepper needs to move first");
             int bot_steps_to_move = target_steps - Config.bot_current_position_steps;
             step_motor(true, direction_down, bot_steps_to_move, DEFAULT_STEP_DELAY_US);
-            update_position_attribute(true);
         }
         step_motor(bottom, direction, abs_steps_to_move, DEFAULT_STEP_DELAY_US);
     } else {
@@ -387,8 +385,6 @@ void BlindDriver::move_to_percent(bool bottom, uint16_t target_percent) {
         ESP_LOGE(TAG, "Error setting current position in NVS: %s", esp_err_to_name(res));
     }
     nvs_commit(my_nvs_handle);
-
-    update_position_attribute(bottom);
 }
 
 // --- Get Current Position ---
@@ -445,6 +441,9 @@ void blind_driver_calibrate() {
 
 void blind_driver_move_to_percent(bool bottom, uint16_t target_percent) {
     blind_driver.move_to_percent(bottom, target_percent);
+    update_position_attribute(true);
+    vTaskDelay(pdMS_TO_TICKS(700));
+    update_position_attribute(false);
 }
 
 
@@ -537,6 +536,21 @@ esp_err_t app_driver_attribute_update(app_driver_handle_t driver_handle, uint16_
 
     if (cluster_id == WindowCovering::Id) {
         if (attribute_id == WindowCovering::Attributes::TargetPositionLiftPercent100ths::Id) {
+            
+            uint32_t current_position_attribute_id = WindowCovering::Attributes::CurrentPositionLiftPercent100ths::Id;
+            node_t *node = node::get();
+            endpoint_t *endpoint = endpoint::get(node, endpoint_id);
+            cluster_t *cluster = cluster::get(endpoint, cluster_id);
+            attribute_t *attribute = attribute::get(cluster, current_position_attribute_id);
+            esp_matter_attr_val_t current_val = esp_matter_invalid(NULL);
+            attribute::get_val(attribute, &current_val);
+
+            ESP_LOGW(TAG, "8===============================D : current_val.val.b = %d, val->val.b = %u", current_val.val.b, val->val.b);
+            if (current_val.val.b == val->val.b) {
+                ESP_LOGW(TAG, "8===============================D : Command discarded!!!");
+                return err;
+            }
+
             bool bottom = true;
             if (endpoint_id == blinds_endpoint_id) {
                 bottom = true;
@@ -591,7 +605,7 @@ esp_err_t app_driver_blinds_init() {
     // Initialize the members of the object
     Config.top_step_pin = GPIO_NUM_12;   // Example GPIO for STEP
     Config.top_dir_pin = GPIO_NUM_14;    // Example GPIO for DIR
-    Config.top_enable_pin = GPIO_NUM_13;  // Example GPIO for ENABLE
+    Config.top_enable_pin = GPIO_NUM_33;  // GPIO_NUM_33 for board 1 | GPIO_NUM_13 for boards 2 and 3 <-----
 
     // You can also create another StepperConfig object for the top lift
     Config.bot_step_pin = GPIO_NUM_26;
