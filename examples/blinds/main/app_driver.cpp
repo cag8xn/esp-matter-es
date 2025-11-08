@@ -605,7 +605,7 @@ esp_err_t app_driver_blinds_init() {
     // Initialize the members of the object
     Config.top_step_pin = GPIO_NUM_12;   // Example GPIO for STEP
     Config.top_dir_pin = GPIO_NUM_14;    // Example GPIO for DIR
-    Config.top_enable_pin = GPIO_NUM_33;  // GPIO_NUM_33 for board 1 | GPIO_NUM_13 for boards 2 and 3 <-----
+    Config.top_enable_pin = GPIO_NUM_13;  
 
     // You can also create another StepperConfig object for the top lift
     Config.bot_step_pin = GPIO_NUM_26;
