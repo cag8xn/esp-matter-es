@@ -1,6 +1,6 @@
 idf_component_register(SRCS
                            "app_driver.cpp"
-                           "app_main.cpp"
+                           "app_main.cpp" 
                            "${MATTER_SDK_PATH}/examples/temperature-measurement-app/esp32/main/diagnostic-logs-provider-delegate-impl.cpp"
                        PRIV_INCLUDE_DIRS
                            "."
