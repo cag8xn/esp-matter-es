@@ -57,6 +57,8 @@ static portMUX_TYPE movement_state_lock = portMUX_INITIALIZER_UNLOCKED;
 #define STEPS_PER_REVOLUTION 200 // Adjust based on your motor
 #define MICROSTEPPING 1        // Adjust based on your DRV8825 settings
 #define DEFAULT_STEP_DELAY_US 400 // Adjust for desired speed
+#define START_STOP_STEP_DELAY_US 1400
+#define ACCELERATION_RAMP_STEPS 1000
 #define DEFAULT_MAX_TRAVEL_STEPS 30000
 #define LIMIT_SWITCH_DEBOUNCE_SAMPLES 8
 #define LIMIT_SWITCH_DEBOUNCE_DELAY_US 1000
@@ -212,6 +214,37 @@ static bool is_limit_position_plausible(bool bottom, bool direction)
     return current_position >= (Config.max_steps - margin_steps);
 }
 
+static int get_ramped_step_delay_us(int steps_moved, int total_steps, int cruise_delay_us)
+{
+    if (total_steps <= 0) {
+        return cruise_delay_us;
+    }
+
+    int ramp_steps = total_steps / 2;
+    if (ramp_steps > ACCELERATION_RAMP_STEPS) {
+        ramp_steps = ACCELERATION_RAMP_STEPS;
+    }
+    if (ramp_steps <= 0) {
+        return cruise_delay_us;
+    }
+
+    int steps_remaining = total_steps - steps_moved;
+    int ramp_position = ramp_steps;
+    if (steps_moved < ramp_steps) {
+        ramp_position = steps_moved;
+    }
+    else if (steps_remaining < ramp_steps) {
+        ramp_position = steps_remaining;
+    }
+
+    int delay_range = START_STOP_STEP_DELAY_US - cruise_delay_us;
+    if (delay_range <= 0) {
+        return cruise_delay_us;
+    }
+
+    return START_STOP_STEP_DELAY_US - ((delay_range * ramp_position) / ramp_steps);
+}
+
 
 // --- Limit Switch Readings ---
 bool BlindDriver::is_top_limit_reached() {
@@ -301,10 +334,11 @@ void BlindDriver::step_motor(bool bottom, bool direction, int steps, int delay_u
             }
         }
 
+        int current_delay_us = get_ramped_step_delay_us(steps_moved, steps, delay_us);
         gpio_set_level(step_pin, 1);
-        usleep(delay_us);
+        usleep(current_delay_us);
         gpio_set_level(step_pin, 0);
-        usleep(delay_us);
+        usleep(current_delay_us);
         steps_moved++;
 
         if (steps_moved % 50 == 0) {
