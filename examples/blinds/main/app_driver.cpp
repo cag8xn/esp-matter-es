@@ -44,6 +44,8 @@ static constexpr uint16_t INVALID_ENDPOINT_ID = UINT16_MAX;
 static uint16_t busy_endpoint = INVALID_ENDPOINT_ID;
 static volatile bool requested = false;
 static volatile bool internal_attribute_update = false;
+static uint32_t bottom_command_sequence = 0;
+static uint32_t top_command_sequence = 0;
 static SemaphoreHandle_t movement_mutex = NULL;
 static portMUX_TYPE movement_state_lock = portMUX_INITIALIZER_UNLOCKED;
 
@@ -59,6 +61,7 @@ static portMUX_TYPE movement_state_lock = portMUX_INITIALIZER_UNLOCKED;
 #define LIMIT_SWITCH_DEBOUNCE_SAMPLES 8
 #define LIMIT_SWITCH_DEBOUNCE_DELAY_US 1000
 #define LIMIT_SWITCH_POSITION_MARGIN_MIN_STEPS 50
+#define MOVEMENT_COMMAND_SETTLE_MS 1200
 
 #define direction_up 1
 #define direction_down 0
@@ -89,6 +92,7 @@ static bool nvs_ready = false;
 struct MovementParams {
     bool bottom;
     uint16_t position_percent;
+    uint32_t command_sequence;
 };
 
 
@@ -140,6 +144,29 @@ static uint16_t get_busy_endpoint()
     endpoint_id = busy_endpoint;
     taskEXIT_CRITICAL(&movement_state_lock);
     return endpoint_id;
+}
+
+static uint32_t register_movement_command(bool bottom)
+{
+    uint32_t sequence;
+    taskENTER_CRITICAL(&movement_state_lock);
+    if (bottom) {
+        sequence = ++bottom_command_sequence;
+    }
+    else {
+        sequence = ++top_command_sequence;
+    }
+    taskEXIT_CRITICAL(&movement_state_lock);
+    return sequence;
+}
+
+static bool is_latest_movement_command(bool bottom, uint32_t sequence)
+{
+    bool is_latest;
+    taskENTER_CRITICAL(&movement_state_lock);
+    is_latest = sequence == (bottom ? bottom_command_sequence : top_command_sequence);
+    taskEXIT_CRITICAL(&movement_state_lock);
+    return is_latest;
 }
 
 static uint16_t clamp_target_percent(uint16_t percent)
@@ -554,6 +581,9 @@ void update_position_attribute(bool bottom) {
     esp_matter_attr_val_t attr_val;
     attr_val.type = ESP_MATTER_VAL_TYPE_UINT16;  // Set the value type
     attr_val.val.u16 = blind_driver_get_current_percent(bottom);             // Store the new position
+    esp_matter_attr_val_t operational_status;
+    operational_status.type = ESP_MATTER_VAL_TYPE_UINT8;
+    operational_status.val.u8 = 0;
     uint16_t endpoint = 0;
     if (bottom) {
         endpoint = Config.bot_endpoint;
@@ -573,6 +603,12 @@ void update_position_attribute(bool bottom) {
         WindowCovering::Id,  // Pass the cluster ID (Window Covering cluster)
         Attributes::TargetPositionLiftPercent100ths::Id,  // Attribute ID
         &attr_val  // Pass the struct instead of a raw pointer
+    );
+    esp_matter::attribute::update(
+        endpoint,
+        WindowCovering::Id,
+        Attributes::OperationalStatus::Id,
+        &operational_status
     );
     internal_attribute_update = false;
 }
@@ -668,7 +704,23 @@ void movement_task(void* param) {
         return;
     }
 
+    ESP_LOGI(TAG, "Waiting %dms for movement command to settle on endpoint %d.", MOVEMENT_COMMAND_SETTLE_MS,
+             requested_endpoint);
+    vTaskDelay(pdMS_TO_TICKS(MOVEMENT_COMMAND_SETTLE_MS));
+    if (!is_latest_movement_command(p->bottom, p->command_sequence)) {
+        ESP_LOGI(TAG, "Discarding superseded movement command for endpoint %d.", requested_endpoint);
+        free(p);
+        vTaskDelete(NULL);
+        return;
+    }
+
     while (xSemaphoreTake(movement_mutex, pdMS_TO_TICKS(200)) != pdTRUE) {
+        if (!is_latest_movement_command(p->bottom, p->command_sequence)) {
+            ESP_LOGI(TAG, "Discarding superseded movement command while waiting for endpoint %d.", requested_endpoint);
+            free(p);
+            vTaskDelete(NULL);
+            return;
+        }
         if (get_busy_endpoint() == requested_endpoint && !is_requested()) {
             set_requested(true);
         }
@@ -714,10 +766,6 @@ esp_err_t app_driver_attribute_update(app_driver_handle_t driver_handle, uint16_
             attribute::get_val(attribute, &current_val);
 
             ESP_LOGW(TAG, "8===============================D : current_val.val.u16 = %u, val->val.u16 = %u", current_val.val.u16, val->val.u16);
-            if (current_val.val.u16 == val->val.u16) {
-                ESP_LOGW(TAG, "8===============================D : Command discarded!!!");
-                return err;
-            }
 
             bool bottom = true;
             if (endpoint_id == blinds_endpoint_id) {
@@ -740,6 +788,10 @@ esp_err_t app_driver_attribute_update(app_driver_handle_t driver_handle, uint16_
             }
             params->bottom = bottom;
             params->position_percent = target_percent;
+            params->command_sequence = register_movement_command(bottom);
+            if (get_busy_endpoint() != INVALID_ENDPOINT_ID) {
+                set_requested(true);
+            }
             if (xTaskCreate(&movement_task, "movement_task", 4096, params, 5, NULL) != pdPASS) {
                 ESP_LOGE(TAG, "Failed to create movement task.");
                 free(params);
