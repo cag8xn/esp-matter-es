@@ -154,7 +154,12 @@ extern "C" void app_main()
     //esp_err_t err = ESP_OK;
 
     /* Initialize the ESP NVS layer */
-    nvs_flash_init();
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        err = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(err);
 
     esp_matter::node::config_t node_config;
     esp_matter::node_t *node = esp_matter::node::create(&node_config, app_attribute_update_cb, NULL);
@@ -203,13 +208,11 @@ extern "C" void app_main()
     esp_matter::endpoint_t *root_ep = esp_matter::endpoint::get(node, 0); // get the root node ep
     esp_matter::cluster::diagnostic_logs::create(root_ep, &diag_logs_config, CLUSTER_FLAG_SERVER);
 
-    esp_matter::start(app_event_cb);
-
-    vTaskDelay(pdMS_TO_TICKS(1000)); // Wait a bit
-    
-    app_driver_blinds_init();
+    ESP_ERROR_CHECK(app_driver_blinds_init());
     app_driver_handle_t button_handle = app_driver_button_init();
     app_driver_handle_t button_reset_handle = app_driver_reset_button_init();
+
+    esp_matter::start(app_event_cb);
 
     //app_driver_blinds_top_init(blinds_top_endpoint_id); // Initialize the driver for the top lift
 

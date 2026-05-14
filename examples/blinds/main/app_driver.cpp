@@ -13,6 +13,7 @@
 #include <math.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include <app_reset.h>
 
 #include <esp_matter.h>
@@ -20,6 +21,7 @@
 #include <app_priv.h>
 
 #include <stdio.h>
+#include <stdint.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <driver/gpio.h>
@@ -38,8 +40,12 @@ using namespace esp_matter::cluster;
 static const char *TAG = "app_driver";
 extern uint16_t blinds_endpoint_id;
 extern uint16_t blinds_top_endpoint_id;
-uint16_t busy_endpoint = 777;
-bool requested = false;
+static constexpr uint16_t INVALID_ENDPOINT_ID = UINT16_MAX;
+static uint16_t busy_endpoint = INVALID_ENDPOINT_ID;
+static volatile bool requested = false;
+static volatile bool internal_attribute_update = false;
+static SemaphoreHandle_t movement_mutex = NULL;
+static portMUX_TYPE movement_state_lock = portMUX_INITIALIZER_UNLOCKED;
 
 // --- Configuration ---
 
@@ -49,6 +55,10 @@ bool requested = false;
 #define STEPS_PER_REVOLUTION 200 // Adjust based on your motor
 #define MICROSTEPPING 1        // Adjust based on your DRV8825 settings
 #define DEFAULT_STEP_DELAY_US 400 // Adjust for desired speed
+#define DEFAULT_MAX_TRAVEL_STEPS 30000
+#define LIMIT_SWITCH_DEBOUNCE_SAMPLES 8
+#define LIMIT_SWITCH_DEBOUNCE_DELAY_US 1000
+#define LIMIT_SWITCH_POSITION_MARGIN_MIN_STEPS 50
 
 #define direction_up 1
 #define direction_down 0
@@ -68,17 +78,17 @@ public:
     int32_t bot_current_position_steps = 0;
     uint16_t bot_endpoint;
 
-    //TODO: make this persistent in nvs
-    bool is_calibrated = true;
+    bool is_calibrated = false;
 };
 
 StepperConfig Config;
 
 nvs_handle_t my_nvs_handle;
+static bool nvs_ready = false;
 
 struct MovementParams {
     bool bottom;
-    u_int16_t position_percent;
+    uint16_t position_percent;
 };
 
 
@@ -100,14 +110,89 @@ public:
 
 BlindDriver::BlindDriver() {}
 
+static void set_requested(bool value)
+{
+    taskENTER_CRITICAL(&movement_state_lock);
+    requested = value;
+    taskEXIT_CRITICAL(&movement_state_lock);
+}
+
+static bool is_requested()
+{
+    bool value;
+    taskENTER_CRITICAL(&movement_state_lock);
+    value = requested;
+    taskEXIT_CRITICAL(&movement_state_lock);
+    return value;
+}
+
+static void set_busy_endpoint(uint16_t endpoint_id)
+{
+    taskENTER_CRITICAL(&movement_state_lock);
+    busy_endpoint = endpoint_id;
+    taskEXIT_CRITICAL(&movement_state_lock);
+}
+
+static uint16_t get_busy_endpoint()
+{
+    uint16_t endpoint_id;
+    taskENTER_CRITICAL(&movement_state_lock);
+    endpoint_id = busy_endpoint;
+    taskEXIT_CRITICAL(&movement_state_lock);
+    return endpoint_id;
+}
+
+static uint16_t clamp_target_percent(uint16_t percent)
+{
+    return percent > 10000 ? 10000 : percent;
+}
+
+static int32_t limit_switch_position_margin_steps()
+{
+    if (Config.max_steps <= 0) {
+        return LIMIT_SWITCH_POSITION_MARGIN_MIN_STEPS;
+    }
+
+    int32_t one_percent = Config.max_steps / 100;
+    return one_percent > LIMIT_SWITCH_POSITION_MARGIN_MIN_STEPS ? one_percent : LIMIT_SWITCH_POSITION_MARGIN_MIN_STEPS;
+}
+
+static bool read_limit_switch_stable(gpio_num_t pin)
+{
+    if (gpio_get_level(pin) != 0) {
+        return false;
+    }
+
+    for (int sample = 1; sample < LIMIT_SWITCH_DEBOUNCE_SAMPLES; sample++) {
+        usleep(LIMIT_SWITCH_DEBOUNCE_DELAY_US);
+        if (gpio_get_level(pin) != 0) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static bool is_limit_position_plausible(bool bottom, bool direction)
+{
+    int32_t current_position = bottom ? Config.bot_current_position_steps : Config.top_current_position_steps;
+    int32_t margin_steps = limit_switch_position_margin_steps();
+
+    if (direction == direction_up) {
+        return current_position <= margin_steps;
+    }
+
+    return current_position >= (Config.max_steps - margin_steps);
+}
+
 
 // --- Limit Switch Readings ---
 bool BlindDriver::is_top_limit_reached() {
-    return gpio_get_level(TOP_LIMIT_SWITCH_PIN) == 0; // Assuming switch pulls low when active
+    return read_limit_switch_stable(TOP_LIMIT_SWITCH_PIN); // Assuming switch pulls low when active
 }
 
 bool BlindDriver::is_bottom_limit_reached() {
-    return gpio_get_level(BOTTOM_LIMIT_SWITCH_PIN) == 0; // Assuming switch pulls low when active
+    return read_limit_switch_stable(BOTTOM_LIMIT_SWITCH_PIN); // Assuming switch pulls low when active
 }
 
 // --- Stepper Motor Control ---
@@ -136,41 +221,57 @@ void BlindDriver::step_motor(bool bottom, bool direction, int steps, int delay_u
 
     while (steps_moved < steps) {
         // Safety check for limit switches
-        if ((direction && is_top_limit_reached())) {
-            ESP_LOGW(TAG, "Top limit switch triggered, reverting movement and stopping stepper.");
-            gpio_set_level(dir_pin, !direction);
-            while (is_top_limit_reached()) {
-                gpio_set_level(step_pin, 1);
-                usleep(delay_us);
-                gpio_set_level(step_pin, 0);
-                usleep(delay_us);
+        if (direction) {
+            bool limit_position_plausible = is_limit_position_plausible(bottom, direction);
+            if (limit_position_plausible && is_top_limit_reached()) {
+                ESP_LOGW(TAG, "Top limit switch triggered, reverting movement and stopping stepper.");
+                gpio_set_level(dir_pin, !direction);
+                while (is_top_limit_reached()) {
+                    gpio_set_level(step_pin, 1);
+                    usleep(delay_us);
+                    gpio_set_level(step_pin, 0);
+                    usleep(delay_us);
 
-                if (bottom) {
-                    Config.bot_current_position_steps++;
+                    if (bottom) {
+                        Config.bot_current_position_steps++;
+                    }
+                    else {
+                        Config.top_current_position_steps++;
+                    }
                 }
-                else {
-                    Config.top_current_position_steps++;
-                }
+                break;
             }
-            break;
+            else if (!limit_position_plausible && (steps_moved % 200 == 0) && gpio_get_level(TOP_LIMIT_SWITCH_PIN) == 0) {
+                ESP_LOGW(TAG, "Ignored top limit signal away from expected travel end. Stepper %d position: %ld, max: %ld",
+                         bottom, bottom ? Config.bot_current_position_steps : Config.top_current_position_steps,
+                         Config.max_steps);
+            }
         }
-        if ((!(direction) && is_bottom_limit_reached())) {
-            ESP_LOGW(TAG, "Bottom limit switch triggered, reverting movement and stopping stepper.");
-            gpio_set_level(dir_pin, !direction);
-            while (is_bottom_limit_reached()) {
-                gpio_set_level(step_pin, 1);
-                usleep(delay_us);
-                gpio_set_level(step_pin, 0);
-                usleep(delay_us);
+        if (!(direction)) {
+            bool limit_position_plausible = is_limit_position_plausible(bottom, direction);
+            if (limit_position_plausible && is_bottom_limit_reached()) {
+                ESP_LOGW(TAG, "Bottom limit switch triggered, reverting movement and stopping stepper.");
+                gpio_set_level(dir_pin, !direction);
+                while (is_bottom_limit_reached()) {
+                    gpio_set_level(step_pin, 1);
+                    usleep(delay_us);
+                    gpio_set_level(step_pin, 0);
+                    usleep(delay_us);
 
-                if (bottom) {
-                    Config.bot_current_position_steps++;
+                    if (bottom) {
+                        Config.bot_current_position_steps--;
+                    }
+                    else {
+                        Config.top_current_position_steps--;
+                    }
                 }
-                else {
-                    Config.top_current_position_steps++;
-                }
+                break;
             }
-            break;
+            else if (!limit_position_plausible && (steps_moved % 200 == 0) && gpio_get_level(BOTTOM_LIMIT_SWITCH_PIN) == 0) {
+                ESP_LOGW(TAG, "Ignored bottom limit signal away from expected travel end. Stepper %d position: %ld, max: %ld",
+                         bottom, bottom ? Config.bot_current_position_steps : Config.top_current_position_steps,
+                         Config.max_steps);
+            }
         }
 
         gpio_set_level(step_pin, 1);
@@ -181,7 +282,7 @@ void BlindDriver::step_motor(bool bottom, bool direction, int steps, int delay_u
 
         if (steps_moved % 50 == 0) {
             vTaskDelay(pdMS_TO_TICKS(5)); // Micro pause (1 tick = typically 1ms)
-            if (requested) {
+            if (is_requested()) {
                 ESP_LOGW(TAG, "Another command was received. Current task will be terminated.");
                 break;
             }
@@ -233,6 +334,7 @@ uint16_t BlindDriver::steps_to_percent(int steps) {
 // --- Calibration Function ---
 void BlindDriver::calibrate() {
     ESP_LOGI(TAG, "Starting blind calibration...");
+    Config.is_calibrated = false;
 
     // Move down until bottom limit is reached
     ESP_LOGI(TAG, "Moving bottom stepper up to find top limit...");
@@ -240,6 +342,11 @@ void BlindDriver::calibrate() {
     gpio_set_level(Config.bot_dir_pin, direction_up); // Set direction up
     int useless_steps = 0;
     while (!is_top_limit_reached()) {
+        if (useless_steps >= DEFAULT_MAX_TRAVEL_STEPS) {
+            ESP_LOGE(TAG, "Calibration failed: bottom stepper did not reach top limit within %d steps.", DEFAULT_MAX_TRAVEL_STEPS);
+            gpio_set_level(Config.bot_enable_pin, 1);
+            return;
+        }
         gpio_set_level(Config.bot_step_pin, 1);
         usleep(DEFAULT_STEP_DELAY_US);
         gpio_set_level(Config.bot_step_pin, 0);
@@ -251,11 +358,18 @@ void BlindDriver::calibrate() {
     }
     // Move away from the limit switch
     gpio_set_level(Config.bot_dir_pin, direction_down);
+    useless_steps = 0;
     while (is_top_limit_reached()) {
+        if (useless_steps >= DEFAULT_MAX_TRAVEL_STEPS) {
+            ESP_LOGE(TAG, "Calibration failed: bottom stepper could not move away from top limit.");
+            gpio_set_level(Config.bot_enable_pin, 1);
+            return;
+        }
         gpio_set_level(Config.bot_step_pin, 1);
         usleep(DEFAULT_STEP_DELAY_US);
         gpio_set_level(Config.bot_step_pin, 0);
         usleep(DEFAULT_STEP_DELAY_US);
+        useless_steps++;
     }
     gpio_set_level(Config.bot_enable_pin, 1);
     ESP_LOGI(TAG, "Bottom stepper top limit reached.");
@@ -266,6 +380,11 @@ void BlindDriver::calibrate() {
     gpio_set_level(Config.bot_dir_pin, direction_down); // Set direction down
     int steps_counted = 0;
     while (!is_bottom_limit_reached()) {
+        if (steps_counted >= DEFAULT_MAX_TRAVEL_STEPS) {
+            ESP_LOGE(TAG, "Calibration failed: bottom stepper did not reach bottom limit within %d steps.", DEFAULT_MAX_TRAVEL_STEPS);
+            gpio_set_level(Config.bot_enable_pin, 1);
+            return;
+        }
         gpio_set_level(Config.bot_step_pin, 1);
         usleep(DEFAULT_STEP_DELAY_US);
         gpio_set_level(Config.bot_step_pin, 0);
@@ -277,12 +396,19 @@ void BlindDriver::calibrate() {
     }
     // Move away from the limit switch
     gpio_set_level(Config.bot_dir_pin, direction_up);
+    useless_steps = 0;
     while (is_bottom_limit_reached()) {
+        if (useless_steps >= DEFAULT_MAX_TRAVEL_STEPS) {
+            ESP_LOGE(TAG, "Calibration failed: bottom stepper could not move away from bottom limit.");
+            gpio_set_level(Config.bot_enable_pin, 1);
+            return;
+        }
         gpio_set_level(Config.bot_step_pin, 1);
         usleep(DEFAULT_STEP_DELAY_US);
         gpio_set_level(Config.bot_step_pin, 0);
         usleep(DEFAULT_STEP_DELAY_US);
         steps_counted--;
+        useless_steps++;
     }
     gpio_set_level(Config.bot_enable_pin, 1);
     Config.max_steps = steps_counted;
@@ -296,6 +422,11 @@ void BlindDriver::calibrate() {
     gpio_set_level(Config.top_dir_pin, direction_up); // Set direction down
     useless_steps = 0;
     while (!is_top_limit_reached()) {
+        if (useless_steps >= DEFAULT_MAX_TRAVEL_STEPS) {
+            ESP_LOGE(TAG, "Calibration failed: top stepper did not reach top limit within %d steps.", DEFAULT_MAX_TRAVEL_STEPS);
+            gpio_set_level(Config.top_enable_pin, 1);
+            return;
+        }
         gpio_set_level(Config.top_step_pin, 1);
         usleep(DEFAULT_STEP_DELAY_US);
         gpio_set_level(Config.top_step_pin, 0);
@@ -307,11 +438,18 @@ void BlindDriver::calibrate() {
     }
     // Move away from the limit switch
     gpio_set_level(Config.top_dir_pin, direction_down);
+    useless_steps = 0;
     while (is_top_limit_reached()) {
+        if (useless_steps >= DEFAULT_MAX_TRAVEL_STEPS) {
+            ESP_LOGE(TAG, "Calibration failed: top stepper could not move away from top limit.");
+            gpio_set_level(Config.top_enable_pin, 1);
+            return;
+        }
         gpio_set_level(Config.top_step_pin, 1);
         usleep(DEFAULT_STEP_DELAY_US);
         gpio_set_level(Config.top_step_pin, 0);
         usleep(DEFAULT_STEP_DELAY_US);
+        useless_steps++;
     }
     gpio_set_level(Config.top_enable_pin, 1);
     ESP_LOGI(TAG, "Top stepper top limit reached.");
@@ -320,20 +458,22 @@ void BlindDriver::calibrate() {
     Config.top_current_position_steps = 0;
     Config.is_calibrated = true;
 
-    // Store the positions in nvs
-    esp_err_t err = nvs_set_i32(my_nvs_handle, "bot_pos_step", (int32_t)Config.bot_current_position_steps);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Error setting current position in NVS: %s", esp_err_to_name(err));
+    if (nvs_ready) {
+        // Store the positions in nvs
+        esp_err_t err = nvs_set_i32(my_nvs_handle, "bot_pos_step", (int32_t)Config.bot_current_position_steps);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Error setting current position in NVS: %s", esp_err_to_name(err));
+        }
+        err = nvs_set_i32(my_nvs_handle, "top_pos_step", (int32_t)Config.top_current_position_steps);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Error setting current position in NVS: %s", esp_err_to_name(err));
+        }
+        err = nvs_set_i32(my_nvs_handle, "max_steps", (int32_t)Config.max_steps);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Error setting current position in NVS: %s", esp_err_to_name(err));
+        }
+        nvs_commit(my_nvs_handle);
     }
-    err = nvs_set_i32(my_nvs_handle, "top_pos_step", (int32_t)Config.top_current_position_steps);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Error setting current position in NVS: %s", esp_err_to_name(err));
-    }
-    err = nvs_set_i32(my_nvs_handle, "max_steps", (int32_t)Config.max_steps);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Error setting current position in NVS: %s", esp_err_to_name(err));
-    }
-    nvs_commit(my_nvs_handle);
 }
 
 // --- Move to Target Position Function ---
@@ -343,6 +483,7 @@ void BlindDriver::move_to_percent(bool bottom, uint16_t target_percent) {
         return;
     }
 
+    target_percent = clamp_target_percent(target_percent);
     int target_steps = percent_to_steps(bottom, target_percent);
     ESP_LOGI(TAG, "---------- Moving stepper %d to target percentage: %d (steps: %d). Current position: top %ld - bottom %ld",
              bottom, target_percent, target_steps, Config.top_current_position_steps, Config.bot_current_position_steps);
@@ -375,16 +516,18 @@ void BlindDriver::move_to_percent(bool bottom, uint16_t target_percent) {
 
     ESP_LOGI(TAG, "---------- Moved stepper %d to target percentage: %d (steps: %d). Current position: top %ld - bottom %ld",
         bottom, target_percent, target_steps, Config.top_current_position_steps, Config.bot_current_position_steps);
-    // Store the position in nvs
-    esp_err_t res = nvs_set_i32(my_nvs_handle, "bot_pos_step", (int32_t)Config.bot_current_position_steps);
-    if (res != ESP_OK) {
-        ESP_LOGE(TAG, "Error setting current position in NVS: %s", esp_err_to_name(res));
+    if (nvs_ready) {
+        // Store the position in nvs
+        esp_err_t res = nvs_set_i32(my_nvs_handle, "bot_pos_step", (int32_t)Config.bot_current_position_steps);
+        if (res != ESP_OK) {
+            ESP_LOGE(TAG, "Error setting current position in NVS: %s", esp_err_to_name(res));
+        }
+        res = nvs_set_i32(my_nvs_handle, "top_pos_step", (int32_t)Config.top_current_position_steps);
+        if (res != ESP_OK) {
+            ESP_LOGE(TAG, "Error setting current position in NVS: %s", esp_err_to_name(res));
+        }
+        nvs_commit(my_nvs_handle);
     }
-    res = nvs_set_i32(my_nvs_handle, "top_pos_step", (int32_t)Config.top_current_position_steps);
-    if (res != ESP_OK) {
-        ESP_LOGE(TAG, "Error setting current position in NVS: %s", esp_err_to_name(res));
-    }
-    nvs_commit(my_nvs_handle);
 }
 
 // --- Get Current Position ---
@@ -418,6 +561,7 @@ void update_position_attribute(bool bottom) {
     else {
         endpoint = Config.top_endpoint;
     }
+    internal_attribute_update = true;
     esp_matter::attribute::update(
         endpoint,
         WindowCovering::Id,  // Pass the cluster ID (Window Covering cluster)
@@ -430,6 +574,7 @@ void update_position_attribute(bool bottom) {
         Attributes::TargetPositionLiftPercent100ths::Id,  // Attribute ID
         &attr_val  // Pass the struct instead of a raw pointer
     );
+    internal_attribute_update = false;
 }
 
 void blind_driver_calibrate() {
@@ -487,7 +632,21 @@ static esp_err_t app_driver_blinds_set_power(led_indicator_handle_t handle, esp_
 */
 
 void calibration_task(void* param) {
+    if (movement_mutex == NULL) {
+        ESP_LOGE(TAG, "Movement mutex is not initialized.");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    while (xSemaphoreTake(movement_mutex, pdMS_TO_TICKS(200)) != pdTRUE) {
+        set_requested(true);
+        ESP_LOGI(TAG, "A driver is busy. Waiting to calibrate...");
+    }
+    set_requested(false);
+    set_busy_endpoint(INVALID_ENDPOINT_ID);
     blind_driver_calibrate();
+    set_busy_endpoint(INVALID_ENDPOINT_ID);
+    xSemaphoreGive(movement_mutex);
     vTaskDelete(NULL); // End the task
 }
 
@@ -500,28 +659,30 @@ static void app_driver_button_toggle_cb(void *arg, void *data)
 
 void movement_task(void* param) {
     MovementParams* p = static_cast<MovementParams*>(param);
-    while (busy_endpoint != 777) {
-        if ((p->bottom && (busy_endpoint == blinds_endpoint_id)) || (!(p->bottom) && (busy_endpoint == blinds_top_endpoint_id))) {
-            if (!(requested)) {
-                requested = true;
-            }
+    uint16_t requested_endpoint = p->bottom ? blinds_endpoint_id : blinds_top_endpoint_id;
+
+    if (movement_mutex == NULL) {
+        ESP_LOGE(TAG, "Movement mutex is not initialized.");
+        free(p);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    while (xSemaphoreTake(movement_mutex, pdMS_TO_TICKS(200)) != pdTRUE) {
+        if (get_busy_endpoint() == requested_endpoint && !is_requested()) {
+            set_requested(true);
         }
         ESP_LOGI(TAG, "A driver is busy. Waiting 200ms...");
-        vTaskDelay(pdMS_TO_TICKS(200));
     }
-    ESP_LOGI(TAG, "8====================================================D DRIVER GOT BUSY!!!!!!");
-    requested = false;
-    if (p->bottom) {
-        busy_endpoint = blinds_endpoint_id;
-    }
-    else {
-        busy_endpoint = blinds_top_endpoint_id;
-    }
-    MovementParams* params = (MovementParams*) param;
-    blind_driver_move_to_percent(params->bottom, params->position_percent);
-    busy_endpoint = 777;
-    ESP_LOGI(TAG, "8====================================================D DRIVER GOT RELEASED!!!!!!");
-    free(params);  // Clean up memory
+
+    ESP_LOGI(TAG, "Movement driver is busy.");
+    set_requested(false);
+    set_busy_endpoint(requested_endpoint);
+    blind_driver_move_to_percent(p->bottom, p->position_percent);
+    set_busy_endpoint(INVALID_ENDPOINT_ID);
+    xSemaphoreGive(movement_mutex);
+    ESP_LOGI(TAG, "Movement driver released.");
+    free(p);  // Clean up memory
     vTaskDelete(NULL); // End the task
 }
 
@@ -534,8 +695,15 @@ esp_err_t app_driver_attribute_update(app_driver_handle_t driver_handle, uint16_
     //ESP_LOGI(TAG, "8===============================D : endpoint_id = %d, blinds_endpoint_id = %d", endpoint_id, blinds_endpoint_id);
     esp_err_t err = ESP_OK;
 
+    if (internal_attribute_update) {
+        return err;
+    }
+
     if (cluster_id == WindowCovering::Id) {
         if (attribute_id == WindowCovering::Attributes::TargetPositionLiftPercent100ths::Id) {
+            if (endpoint_id != blinds_endpoint_id && endpoint_id != blinds_top_endpoint_id) {
+                return err;
+            }
             
             uint32_t current_position_attribute_id = WindowCovering::Attributes::CurrentPositionLiftPercent100ths::Id;
             node_t *node = node::get();
@@ -545,8 +713,8 @@ esp_err_t app_driver_attribute_update(app_driver_handle_t driver_handle, uint16_
             esp_matter_attr_val_t current_val = esp_matter_invalid(NULL);
             attribute::get_val(attribute, &current_val);
 
-            ESP_LOGW(TAG, "8===============================D : current_val.val.b = %d, val->val.b = %u", current_val.val.b, val->val.b);
-            if (current_val.val.b == val->val.b) {
+            ESP_LOGW(TAG, "8===============================D : current_val.val.u16 = %u, val->val.u16 = %u", current_val.val.u16, val->val.u16);
+            if (current_val.val.u16 == val->val.u16) {
                 ESP_LOGW(TAG, "8===============================D : Command discarded!!!");
                 return err;
             }
@@ -561,14 +729,22 @@ esp_err_t app_driver_attribute_update(app_driver_handle_t driver_handle, uint16_
             // Adjust the lift percentage if needed
             uint16_t target_percent;
             // Access the uint16_t value from the esp_matter_attr_val_t structure
-            target_percent = val->val.u16;
+            target_percent = clamp_target_percent(val->val.u16);
             //test_movement_task(bottom, target_percent);
             ESP_LOGI(TAG, "8===============================D Received attribute update: TargetPositionLiftPercent100ths - target_percent: %d", target_percent);
             
             MovementParams* params = (MovementParams*) malloc(sizeof(MovementParams));
+            if (params == NULL) {
+                ESP_LOGE(TAG, "Failed to allocate movement params.");
+                return ESP_ERR_NO_MEM;
+            }
             params->bottom = bottom;
             params->position_percent = target_percent;
-            xTaskCreate(&movement_task, "movement_task", 4096, params, 5, NULL);
+            if (xTaskCreate(&movement_task, "movement_task", 4096, params, 5, NULL) != pdPASS) {
+                ESP_LOGE(TAG, "Failed to create movement task.");
+                free(params);
+                return ESP_ERR_NO_MEM;
+            }
                   
         }
     }
@@ -576,30 +752,48 @@ esp_err_t app_driver_attribute_update(app_driver_handle_t driver_handle, uint16_
 }
 
 esp_err_t app_driver_blinds_init() {
+    if (movement_mutex == NULL) {
+        movement_mutex = xSemaphoreCreateMutex();
+        if (movement_mutex == NULL) {
+            ESP_LOGE(TAG, "Failed to create movement mutex.");
+            return ESP_ERR_NO_MEM;
+        }
+    }
 
     // Initialize the ESP NVS layer.
     esp_err_t err = nvs_flash_init();
-    if (err != ESP_OK) {
+    if (err != ESP_OK && err != ESP_ERR_NVS_NO_FREE_PAGES && err != ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_LOGW(TAG, "nvs_flash_init() failed: %s", esp_err_to_name(err));
     };
     
     err = nvs_open("my_app", NVS_READWRITE, &my_nvs_handle);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Error (%s) opening NVS handle!\n", esp_err_to_name(err));
+    } else {
+        nvs_ready = true;
+        ESP_LOGI(TAG, "NVS handle opened\n");
     }
-    ESP_LOGI(TAG, "NVS handle opened\n");
-    
-    err = nvs_get_i32(my_nvs_handle, "bot_pos_step", &Config.bot_current_position_steps);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Error (%s) reading!\n", esp_err_to_name(err));
-    }
-    err = nvs_get_i32(my_nvs_handle, "top_pos_step", &Config.top_current_position_steps);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Error (%s) reading!\n", esp_err_to_name(err));
-    }
-    err = nvs_get_i32(my_nvs_handle, "max_steps", &Config.max_steps);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Error (%s) reading!\n", esp_err_to_name(err));
+
+    if (nvs_ready) {
+        int32_t bot_position = 0;
+        int32_t top_position = 0;
+        int32_t max_steps = 0;
+        esp_err_t bot_err = nvs_get_i32(my_nvs_handle, "bot_pos_step", &bot_position);
+        esp_err_t top_err = nvs_get_i32(my_nvs_handle, "top_pos_step", &top_position);
+        esp_err_t max_err = nvs_get_i32(my_nvs_handle, "max_steps", &max_steps);
+
+        if (bot_err == ESP_OK && top_err == ESP_OK && max_err == ESP_OK && max_steps > 0) {
+            Config.bot_current_position_steps = bot_position;
+            Config.top_current_position_steps = top_position;
+            Config.max_steps = max_steps;
+            Config.is_calibrated = true;
+        } else {
+            Config.bot_current_position_steps = 0;
+            Config.top_current_position_steps = 0;
+            Config.max_steps = 0;
+            Config.is_calibrated = false;
+            ESP_LOGW(TAG, "No valid calibration found in NVS. Run calibration before moving blinds.");
+        }
     }
 
     // Initialize the members of the object
